@@ -31,6 +31,7 @@ services:
       target: ${VISION_BUILD_TARGET:-simulation}
     environment:
       SOURCE_MODE: ${SOURCE_MODE:-simulation}
+      PROCESS_FPS: ${PROCESS_FPS:-3}
       VIDEO_SOURCE: ${VIDEO_SOURCE:-}
       CAMERA_ID: ${CAMERA_ID:-camera-01}
       DOCK_ID: ${DOCK_ID:-dock-01}

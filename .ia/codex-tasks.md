@@ -32,6 +32,8 @@ Aceite:
 
 ## T02 — Frame sampling configurável
 
+**Status:** concluída em 13/09/2026. `PROCESS_FPS=3`, seleção temporal, descartes nas métricas e preservação do tempo dos frames implementados. 58 testes Python passaram; Compose validado com `.env.example`. Evidência em [Testes](testes.md). Fila e benchmark real permanecem em T03/T10.
+
 **Objetivo:** impedir inferência em todos os frames.
 
 Adicionar `PROCESS_FPS`, com default inicial de 3 FPS para modo de vídeo.

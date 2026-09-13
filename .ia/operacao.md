@@ -220,7 +220,7 @@ dos modelos). Contadores e amostras reiniciam após a emissão. Os campos são:
 |---|---|
 | `frames_received` | Leituras com `ok=True`, incluindo imagem inválida |
 | `frames_processed` | Frames enviados a `model.track`, incluindo chamadas que falharam |
-| `frames_discarded` | Leituras bem-sucedidas descartadas por imagem inválida ou encerramento antes da inferência |
+| `frames_discarded` | Leituras bem-sucedidas descartadas por sampling, imagem inválida ou encerramento antes da inferência |
 | `received_fps` / `processed_fps` | Contadores divididos pelo tempo real decorrido no intervalo |
 | `interval_seconds` / `final` | Duração da janela e indicação de resumo final |
 | `stages` | Estatísticas de `vehicle_tracking`, `plate_detection` e `ocr` |
@@ -239,7 +239,43 @@ sua criação. Os tempos usam relógio monotônico e não alteram horários de e
 Esses FPS medem leitura/processamento pela aplicação, não o FPS nativo da câmera:
 o loop síncrono ainda não consegue observar descartes internos do driver/FFmpeg.
 `ok=False` (inclusive fim de arquivo) não conta como frame recebido/descartado.
-Esta etapa não implementa sampling, filas, métricas de CPU/memória, contagem de OCR
-por visita ou instrumentação do diagnóstico `ocr_test`. Com `OCR_ENABLED=false`,
+Sampling foi acrescentado na T02. Ainda não há filas no modo `video`, métricas
+de CPU/memória, contagem de OCR por visita ou instrumentação de `ocr_test`. Com `OCR_ENABLED=false`,
 as etapas de placa/OCR continuam com zero chamadas. Não há URL, imagem ou placa
 no payload das métricas.
+
+## Sampling configurável (T02)
+
+`PROCESS_FPS=3` é a taxa alvo no modo `video`, disponível no Compose e no
+`.env.example`. Aceita número finito maior que zero e até 1000; configuração
+inválida falha antes dos imports/modelos. Não se aplica a `simulation` ou
+`ocr_test`. Para comparar com a cadência anterior em um arquivo de FPS conhecido,
+configure uma taxa maior ou igual à taxa do arquivo.
+
+A seleção aceita o primeiro frame de cada faixa temporal de `1 / PROCESS_FPS`
+segundo, ancorada no primeiro frame da conexão. Não executa chamadas extras para
+compensar faixas perdidas, não duplica frames de fontes lentas e reinicia a seleção
+na reconexão. Trata-se de uma taxa aproximada, não de espaçamento mínimo rígido
+entre duas inferências em faixas adjacentes.
+
+Em RTSP, o relógio monotônico determina seleção independentemente do FPS reportado
+e de ajustes do relógio de parede. O timestamp do evento continua sendo o horário
+da leitura do frame. Em arquivo, a seleção usa `CAP_PROP_POS_MSEC`, relativa ao
+primeiro frame, e o evento usa esse tempo somado ao início da leitura. Se a posição
+não avança ou é inválida, o tempo avança por `1 / FPS`; FPS não finito, não positivo
+ou maior/igual a 1000 usa 25. Uma posição crescente permite tolerar FPS reportado
+incorreto; se ambos os metadados estiverem incorretos, o tempo será aproximado.
+
+Frames omitidos contam em `frames_discarded` e não chamam `update`/`missing`:
+não representam uma observação negativa de veículo. A confirmação da zona permanece
+dependente das observações selecionadas. Taxas muito baixas podem perder transições
+curtas e precisam de calibração com vídeo anotado.
+
+Placa/OCR continua a cada quinto frame **processado**, para evitar que o sampling
+elimine todas as oportunidades de OCR por coincidência de índices. A captura por
+visita ainda será implementada em T06.
+
+Esta etapa reduz chamadas de inferência, mas ainda lê e decodifica frames em loop
+síncrono. Buffers internos podem acumular atraso durante inferência lenta: a fila
+de frame recente e captura desacoplada pertencem à T03. Não há evidência de ganho
+de CPU/latência com câmera real nesta etapa.

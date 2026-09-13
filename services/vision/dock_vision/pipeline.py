@@ -4,8 +4,10 @@ import os
 from pathlib import Path
 import time
 from urllib.parse import urlsplit
+from time import monotonic
 
 from .metrics import PipelineMetrics
+from .sampling import FileTimeline, FrameSampler
 
 log = logging.getLogger(__name__)
 
@@ -70,6 +72,8 @@ def validate_source(source):
 def run_video(processor, emit, stop):
     source = os.environ.get("VIDEO_SOURCE", "")
     live = validate_source(source)
+    process_fps = os.environ.get("PROCESS_FPS", "3")
+    FrameSampler(process_fps)  # Validate configuration before loading models.
 
     import cv2
     from ultralytics import YOLO
@@ -105,10 +109,9 @@ def run_video(processor, emit, stop):
                 log.warning("Camera unavailable camera_id=%s; retrying in 3 seconds", processor.camera_id)
                 stop.wait(3)
                 continue
-            fps = capture.get(cv2.CAP_PROP_FPS)
-            if not 0 < fps < 1000:
-                fps = 25
-            frame_number, started_at = 0, time.time()
+            timeline = None if live else FileTimeline(capture.get(cv2.CAP_PROP_FPS))
+            sampler = FrameSampler(process_fps)
+            frame_number, processed_number, started_at = 0, 0, time.time()
             while not stop.is_set():
                 metrics.report()
                 try:
@@ -132,9 +135,22 @@ def run_video(processor, emit, stop):
                 if frame_number == 0:
                     log.info("First frame received camera_id=%s width=%s height=%s",
                              processor.camera_id, width, height)
-                # Files use media time, not CPU inference time, for deterministic dwell.
-                last_timestamp = time.time() if live else started_at + frame_number / fps
+                # Sampling never changes the timestamp attached to a selected frame.
+                if live:
+                    last_timestamp = time.time()
+                    sample_time = monotonic()
+                else:
+                    try:
+                        position_ms = capture.get(cv2.CAP_PROP_POS_MSEC)
+                    except cv2.error:
+                        position_ms = float("nan")
+                    sample_time = timeline.advance(position_ms)
+                    last_timestamp = started_at + sample_time
                 frame_number += 1
+                if not sampler.accept(sample_time):
+                    metrics.frames_discarded += 1
+                    continue
+                processed_number += 1
                 metrics.frames_processed += 1
                 with metrics.measure("vehicle_tracking"):
                     result = model.track(frame, persist=True, tracker="bytetrack.yaml", classes=[2, 3, 5, 7],
@@ -149,7 +165,7 @@ def run_video(processor, emit, stop):
                         # Bottom-center approximates vehicle ground contact.
                         point = ((x1 + x2) / (2 * width), y2 / height)
                         readings = []
-                        if reader and frame_number % 5 == 0:
+                        if reader and processed_number % 5 == 0:
                             try:
                                 readings = reader.read(frame, bounds)
                             except Exception:

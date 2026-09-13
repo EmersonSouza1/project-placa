@@ -69,6 +69,8 @@ Critério de aceite:
 
 ### Fase 2 — Sampling de frames e filas limitadas
 
+Status em 13/09/2026: T02 concluída (`PROCESS_FPS`, seleção por tempo e métricas de descarte), com 58 testes Python aprovados. A fila limitada T03 ainda não foi implementada; sampling isolado não comprova ausência de backlog.
+
 Adicionar configuração de taxa de processamento separada da taxa nativa da câmera.
 
 Configuração proposta:

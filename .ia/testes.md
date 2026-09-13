@@ -213,3 +213,25 @@ continuam passando sem bibliotecas de inferência.
 Não foram executados benchmark, câmera/modelos reais ou integração .NET/PostgreSQL
 nesta mudança. Os testes usam relógios/inferências substituídos e não demonstram
 ganho de desempenho ou precisão. Contrato HTTP, API e persistência não mudaram.
+
+## Evidência T02 — Frame sampling, 13/09/2026
+
+Executado em Windows/PowerShell, no diretório `services/vision`:
+
+```powershell
+uv run --no-project --python 3.11 python -m unittest discover -s tests -v
+```
+
+**58 testes passaram**, incluindo 12 novos. Os cenários cobrem seleção a partir
+de 25/30/60 FPS, taxa configurada, fonte lenta, ausência de compensação após pausa,
+validação antes de imports de inferência, FPS inválido/incorreto, posição de mídia
+repetida/regressiva/ausente, reconexão e independência entre seleção RTSP e relógio
+de parede. Um vídeo sintético de 210 frames a 30 FPS envia 21 frames ao detector,
+descarta 189 e preserva entrada/saída em 103/106 s, mesma visita e OCR posterior.
+
+Na raiz, `docker compose --env-file .env.example config --quiet` passou. Nenhum
+container foi iniciado ou reconfigurado. A validação usa placeholders.
+
+Sem ensaio de câmera, modelos reais ou benchmark; testes com dublês não validam
+precisão do tracking em baixa cadência nem ausência de backlog. API/contrato e
+persistência não foram alterados.

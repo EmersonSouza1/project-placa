@@ -39,20 +39,24 @@ def tracked(image, **kwargs):
 
 
 class Capture:
-    def __init__(self, images=(), opened=True, fps=1, end=None):
+    def __init__(self, images=(), opened=True, fps=1, end=None, timestamps=None):
         self.images = iter(images)
+        self.timestamps, self.index = timestamps, -1
         self.opened, self.fps, self.end = opened, fps, end
         self.release = Mock()
 
     def isOpened(self):
         return self.opened
 
-    def get(self, _):
+    def get(self, prop):
+        if prop == 5:
+            return self.timestamps[self.index] if self.timestamps is not None else 0
         return self.fps
 
     def read(self):
         try:
             image = next(self.images)
+            self.index += 1
         except StopIteration:
             if self.end:
                 self.end()
@@ -97,9 +101,10 @@ class PipelineTests(unittest.TestCase):
         self.stop = Event()
         self.wait = self.stack.enter_context(patch.object(self.stop, "wait", side_effect=self.finish_wait))
         self.clock = SimpleNamespace(now=100.0)
+        self.stack.enter_context(patch("dock_vision.pipeline.monotonic", lambda: self.clock.now))
         self.stack.enter_context(patch("dock_vision.pipeline.time", SimpleNamespace(time=lambda: self.clock.now)))
         self.cv = SimpleNamespace(CAP_FFMPEG=1, CAP_PROP_OPEN_TIMEOUT_MSEC=2,
-                                  CAP_PROP_READ_TIMEOUT_MSEC=3, CAP_PROP_FPS=4,
+                                  CAP_PROP_READ_TIMEOUT_MSEC=3, CAP_PROP_FPS=4, CAP_PROP_POS_MSEC=5,
                                   error=type("CaptureError", (Exception,), {}), VideoCapture=Mock())
         self.models = []
 
@@ -212,6 +217,61 @@ class PipelineTests(unittest.TestCase):
         self.assertTrue(summary["final"])
         capture.release.assert_called_once()
 
+
+    def test_process_fps_validation_before_inference_imports(self):
+        with patch.dict(os.environ, PROCESS_FPS="nan"), \
+                patch.dict(sys.modules, {"cv2": None, "ultralytics": None}):
+            with self.assertRaisesRegex(ValueError, "PROCESS_FPS"):
+                run_video(self.zone, self.events.append, self.stop)
+
+    def test_sampled_file_preserves_events_media_time_and_ocr(self):
+        positions = ["outside"] * 60 + ["inside"] * 90 + ["outside"] * 60
+        capture = Capture([frame(p) for p in positions], fps=30,
+                          timestamps=[i * 1000 / 30 for i in range(len(positions))])
+        self.reader.return_value.read.return_value = [("ABC1234", 0.9)]
+        with tempfile.TemporaryDirectory() as directory, patch.dict(os.environ, OCR_ENABLED="true"):
+            path = Path(directory) / "video.mp4"
+            path.touch()
+            summary = self.metrics_summary(self.run_capture([capture], str(path)))
+        self.assertEqual(summary["frames_received"], 210)
+        self.assertEqual(summary["frames_processed"], 21)
+        self.assertEqual(summary["frames_discarded"], 189)
+        self.assertEqual([e["event_type"] for e in self.events], ["entered", "exited"])
+        self.assertEqual(self.events[0]["visit_id"], self.events[1]["visit_id"])
+        self.assertAlmostEqual(datetime.fromisoformat(self.events[0]["occurred_at"]).timestamp(), 103)
+        self.assertAlmostEqual(datetime.fromisoformat(self.events[1]["occurred_at"]).timestamp(), 106)
+        self.assertEqual(self.reader.return_value.read.call_count, 4)
+        self.assertEqual(self.events[-1]["plate"], "ABC1234")
+
+    def test_rtsp_sampling_ignores_reported_fps_and_wall_clock_jumps(self):
+        self.stack.enter_context(patch("dock_vision.pipeline.monotonic",
+                                      side_effect=[i / 30 for i in range(30)]))
+        capture = self.timed_capture(["outside"] * 30, fps=float("nan"))
+        summary = self.metrics_summary(self.run_capture([capture]))
+        self.assertEqual(summary["frames_processed"], 3)
+        self.assertEqual(summary["frames_discarded"], 27)
+        self.assertEqual(self.models[-1].track.call_count, 3)
+
+    def test_file_wrong_reported_fps_uses_media_positions(self):
+        capture = Capture([frame("outside")] * 30, fps=1,
+                          timestamps=[i * 1000 / 30 for i in range(30)])
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "video.mp4"
+            path.touch()
+            summary = self.metrics_summary(self.run_capture([capture], str(path)))
+        self.assertEqual(summary["frames_processed"], 3)
+        self.assertEqual(summary["frames_discarded"], 27)
+
+    def test_custom_fps_and_reconnection_reset_sampling(self):
+        first = Capture([frame("outside")] * 3)
+        second = Capture([frame("outside")] * 3)
+        self.wait.side_effect = [False, True]
+        self.stack.enter_context(patch("dock_vision.pipeline.monotonic",
+                                      side_effect=[0, 0.2, 0.5, 0.6, 0.8, 1.1]))
+        with patch.dict(os.environ, PROCESS_FPS="2"):
+            summary = self.metrics_summary(self.run_capture([first, second]))
+        self.assertEqual(summary["frames_processed"], 4)
+        self.assertEqual(summary["frames_discarded"], 2)
 
     def timed_capture(self, positions, **kwargs):
         capture = Capture([frame(p) for p in positions], **kwargs)

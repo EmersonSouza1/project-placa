@@ -40,11 +40,14 @@ flowchart LR
    de host e porta válida quando informada; arquivos precisam existir. A URL
    original, incluindo autenticação e query, é preservada para a conexão.
    OpenCV abre a fonte com backend FFmpeg e timeouts de 5 segundos.
-2. YOLO usa `model.track(..., persist=True, tracker='bytetrack.yaml')`, confiança
+2. Antes da inferência, `PROCESS_FPS` seleciona até um frame por intervalo de
+   `1 / PROCESS_FPS` segundo (padrão 3 FPS). RTSP usa relógio monotônico;
+   arquivos usam tempo de mídia. Descartes não chamam o processador de zonas.
+   YOLO usa `model.track(..., persist=True, tracker='bytetrack.yaml')`, confiança
    mínima de 0,25 e classes COCO 2, 3, 5 e 7: carro, moto, ônibus e caminhão.
 3. O centro inferior da caixa do veículo é normalizado e enviado ao processador
    de zonas, associado ao ID do tracker.
-4. Se OCR estiver habilitado, a cada quinto frame o recorte do veículo passa pelo
+4. Se OCR estiver habilitado, a cada quinto frame processado o recorte do veículo passa pelo
    detector específico de placas, com confiança mínima de 0,4, e pelo PaddleOCR.
 5. A melhor leitura daquele veículo/frame alimenta o consenso. O processador
    emite eventos quando confirma uma transição ou detecta perda do track.
@@ -53,9 +56,11 @@ OCR e tracking executam no mesmo loop; apenas o envio HTTP usa outro thread.
 Falhas de OCR durante a leitura são registradas sem interromper o tracking. Falhas
 na inicialização dos modelos ainda podem impedir o início do worker.
 
-RTSP usa o horário corrente. Arquivos usam o início da execução mais o índice do
-frame dividido pelo FPS, com fallback de 25 FPS. Isso representa tempo do vídeo,
-não a data original da gravação, nem uma medição precisa de vídeos com FPS variável.
+RTSP mantém o horário de leitura do frame como timestamp do evento. Arquivos
+usam o início da leitura mais a posição de mídia relativa ao primeiro frame.
+Posições ausentes, repetidas ou regressivas avançam pelo FPS reportado; FPS
+inválido usa fallback de 25. Metadados simultaneamente incorretos podem produzir
+tempos aproximados. Não se trata da data original de gravação.
 
 Na desconexão, visitas ativas são interrompidas e o tracker é recriado. O worker
 tenta reconectar após 3 segundos. O `stream_id` permanece durante essa execução;
