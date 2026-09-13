@@ -63,6 +63,8 @@ Aceite:
 
 ## T04 — ROI configurável
 
+**Status:** concluída em 13/09/2026. ROI retangular normalizada e opcional implementada antes do YOLO/ByteTrack, com validação anterior aos imports de visão, restauração das coordenadas do frame completo e testes unitários sem OpenCV/modelos.
+
 **Objetivo:** reduzir a área analisada.
 
 Adicionar ROI de processamento separada do polígono lógico da doca quando necessário.
