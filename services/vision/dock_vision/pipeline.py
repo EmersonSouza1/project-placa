@@ -7,7 +7,8 @@ from urllib.parse import urlsplit
 from time import monotonic
 
 from .metrics import PipelineMetrics
-from .sampling import FileTimeline, FrameSampler
+from .sampling import FrameSampler
+from .stream_reader import StreamReader, queue_capacity
 
 log = logging.getLogger(__name__)
 
@@ -74,6 +75,7 @@ def run_video(processor, emit, stop):
     live = validate_source(source)
     process_fps = os.environ.get("PROCESS_FPS", "3")
     FrameSampler(process_fps)  # Validate configuration before loading models.
+    capacity = queue_capacity(os.environ.get("FRAME_QUEUE_SIZE", "5"))
 
     import cv2
     from ultralytics import YOLO
@@ -86,11 +88,11 @@ def run_video(processor, emit, stop):
     reader = PlateReader(os.environ.get("PLATE_MODEL", "/models/plate.pt"), device, metrics) if os.environ.get("OCR_ENABLED", "false").lower() == "true" else None
     model = YOLO(vehicle_weights)
     capture = None
+    session = 0
     last_timestamp = time.time()
     try:
         while not stop.is_set():
             metrics.report()
-            # Timeouts prevent an unreachable RTSP source from hanging forever.
             try:
                 capture = cv2.VideoCapture(source, cv2.CAP_FFMPEG, [
                     cv2.CAP_PROP_OPEN_TIMEOUT_MSEC, 5000,
@@ -98,7 +100,6 @@ def run_video(processor, emit, stop):
                 ])
                 opened = capture.isOpened()
             except cv2.error:
-                # Native error text may contain the authenticated source URL.
                 opened = False
             if not opened:
                 if capture is not None:
@@ -109,73 +110,58 @@ def run_video(processor, emit, stop):
                 log.warning("Camera unavailable camera_id=%s; retrying in 3 seconds", processor.camera_id)
                 stop.wait(3)
                 continue
-            timeline = None if live else FileTimeline(capture.get(cv2.CAP_PROP_FPS))
-            sampler = FrameSampler(process_fps)
-            frame_number, processed_number, started_at = 0, 0, time.time()
-            while not stop.is_set():
-                metrics.report()
+            session += 1
+            stream = StreamReader(capture, cv2, live, stop, capacity, process_fps,
+                                  session, log, processor.camera_id,
+                                  wall_clock=time.time, sample_clock=monotonic)
+            stream.start()
+            capture = None  # The capture thread now owns read/release.
+            processed_number = 0
+            try:
+                while not stop.is_set():
+                    packet = stream.get()
+                    metrics.capture_snapshot(stream.snapshot())
+                    metrics.report()
+                    if packet is None:
+                        if stream.finished:
+                            break
+                        continue
+                    if packet.session != session:
+                        raise RuntimeError("Capture session mismatch")
+                    frame, last_timestamp = packet.image, packet.timestamp
+                    height, width = frame.shape[:2]
+                    processed_number += 1
+                    metrics.frames_processed += 1
+                    with metrics.measure("vehicle_tracking"):
+                        result = model.track(frame, persist=True, tracker="bytetrack.yaml",
+                                             classes=[2, 3, 5, 7], conf=0.25,
+                                             device=device, verbose=False)[0]
+                    seen = set()
+                    if result.boxes.id is not None:
+                        for box in result.boxes:
+                            track_id = int(box.id.item())
+                            seen.add(track_id)
+                            bounds = box.xyxy[0].tolist()
+                            x1, _, x2, y2 = bounds
+                            point = ((x1 + x2) / (2 * width), y2 / height)
+                            readings = []
+                            if reader and processed_number % 5 == 0:
+                                try:
+                                    readings = reader.read(frame, bounds)
+                                except Exception:
+                                    log.exception("Plate OCR failed; zone tracking continues")
+                            for event in processor.update(track_id, point, last_timestamp, readings):
+                                emit(event)
+                    for event in processor.missing(seen, last_timestamp):
+                        emit(event)
+                if stream.failed:
+                    raise RuntimeError("Capture worker failed") from None
+            finally:
                 try:
-                    ok, frame = capture.read()
-                except cv2.error:
-                    ok, frame = False, None
-                if ok:
-                    metrics.frames_received += 1
-                if stop.is_set():
-                    if ok:
-                        metrics.frames_discarded += 1
-                    break
-                if not ok or frame is None or not frame.size:
-                    if ok:
-                        metrics.frames_discarded += 1
-                    break
-                height, width = frame.shape[:2]
-                if not height or not width:
-                    metrics.frames_discarded += 1
-                    break
-                if frame_number == 0:
-                    log.info("First frame received camera_id=%s width=%s height=%s",
-                             processor.camera_id, width, height)
-                # Sampling never changes the timestamp attached to a selected frame.
-                if live:
-                    last_timestamp = time.time()
-                    sample_time = monotonic()
-                else:
-                    try:
-                        position_ms = capture.get(cv2.CAP_PROP_POS_MSEC)
-                    except cv2.error:
-                        position_ms = float("nan")
-                    sample_time = timeline.advance(position_ms)
-                    last_timestamp = started_at + sample_time
-                frame_number += 1
-                if not sampler.accept(sample_time):
-                    metrics.frames_discarded += 1
-                    continue
-                processed_number += 1
-                metrics.frames_processed += 1
-                with metrics.measure("vehicle_tracking"):
-                    result = model.track(frame, persist=True, tracker="bytetrack.yaml", classes=[2, 3, 5, 7],
-                                         conf=0.25, device=device, verbose=False)[0]
-                seen = set()
-                if result.boxes.id is not None:
-                    for box in result.boxes:
-                        track_id = int(box.id.item())
-                        seen.add(track_id)
-                        bounds = box.xyxy[0].tolist()
-                        x1, _, x2, y2 = bounds
-                        # Bottom-center approximates vehicle ground contact.
-                        point = ((x1 + x2) / (2 * width), y2 / height)
-                        readings = []
-                        if reader and processed_number % 5 == 0:
-                            try:
-                                readings = reader.read(frame, bounds)
-                            except Exception:
-                                log.exception("Plate OCR failed; zone tracking continues")
-                        for event in processor.update(track_id, point, last_timestamp, readings):
-                            emit(event)
-                for event in processor.missing(seen, last_timestamp):
-                    emit(event)
-            capture.release()
-            capture = None
+                    stream.close()
+                finally:
+                    metrics.capture_snapshot(stream.snapshot())
+                    last_timestamp = stream.last_timestamp
             for event in processor.interrupt(last_timestamp if not live else time.time()):
                 emit(event)
             if not live or stop.is_set():
@@ -184,7 +170,6 @@ def run_video(processor, emit, stop):
                         processor.camera_id)
             if stop.wait(3):
                 return
-            # A new tracker cannot inherit IDs/state across camera reconnection.
             model = YOLO(vehicle_weights)
     finally:
         try:

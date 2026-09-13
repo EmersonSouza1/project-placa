@@ -52,7 +52,9 @@ flowchart LR
 5. A melhor leitura daquele veículo/frame alimenta o consenso. O processador
    emite eventos quando confirma uma transição ou detecta perda do track.
 
-OCR e tracking executam no mesmo loop; apenas o envio HTTP usa outro thread.
+OCR e tracking executam no mesmo loop de inferência. A leitura/sampling de frames
+ocorre em um thread por conexão, com fila limitada; a outbox continua enviando
+HTTP em seu próprio thread.
 Falhas de OCR durante a leitura são registradas sem interromper o tracking. Falhas
 na inicialização dos modelos ainda podem impedir o início do worker.
 
@@ -62,7 +64,8 @@ Posições ausentes, repetidas ou regressivas avançam pelo FPS reportado; FPS
 inválido usa fallback de 25. Metadados simultaneamente incorretos podem produzir
 tempos aproximados. Não se trata da data original de gravação.
 
-Na desconexão, visitas ativas são interrompidas e o tracker é recriado. O worker
+Na desconexão, o consumidor termina de tratar a fila da conexão antiga (em RTSP,
+apenas o frame mais recente disponível), interrompe visitas ativas e recria o tracker. O worker
 tenta reconectar após 3 segundos. O `stream_id` permanece durante essa execução;
 novas ocupações recebem novos `visit_id`.
 
@@ -123,3 +126,22 @@ armazena no máximo 512 durações; média e contagem abrangem toda a janela.
 A instrumentação não muda cadência de inferência, domínio, outbox ou contrato
 HTTP. Simulação e diagnóstico `ocr_test` preservam seus fluxos. A semântica dos
 contadores e as limitações estão em [Operação](operacao.md).
+
+## Captura e fila limitada (T03)
+
+[stream_reader.py](../services/vision/dock_vision/stream_reader.py) gerencia um
+thread de leitura por conexão. A abertura continua no coordenador; após o início
+do thread, apenas ele chama `read`/`release`. O produtor aplica sampling e envia
+imagem, timestamp original e sessão em memória. Não acessa domínio, modelos,
+outbox ou API.
+
+A fila possui capacidade `FRAME_QUEUE_SIZE` (padrão 5). Em RTSP, o produtor remove
+o mais antigo quando cheia; o consumidor retira o mais recente e descarta os
+demais pendentes. Em arquivos, produtor aguarda espaço e consumidor mantém FIFO,
+evitando descartar todo o vídeo quando a decodificação é mais rápida que a IA.
+
+Fim/falha de captura são sinalizados fora da fila. O coordenador fecha o leitor e
+aguarda seu encerramento antes de reconectar; cada conexão recebe uma fila nova.
+Frames pendentes são liberados no shutdown. A identidade interna de sessão não
+altera `stream_id`, `visit_id` ou o contrato HTTP. A proteção dos contadores usa
+uma condição/lock, e somente o consumidor agrega os snapshots em `PipelineMetrics`.

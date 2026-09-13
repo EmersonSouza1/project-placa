@@ -82,6 +82,22 @@ class MetricsTests(unittest.TestCase):
             with self.subTest(limit=limit), self.assertRaises(ValueError):
                 PipelineMetrics(self.log, "camera", "stream", sample_limit=limit)
 
+    def test_capture_counters_and_queue_gauges_across_reports(self):
+        self.metrics.capture_snapshot(dict(received=10, discarded=8, queue_discarded=6,
+                                           size=1, peak=5, capacity=5))
+        self.now = 30
+        self.metrics.report()
+        self.assertEqual(self.payload()["frame_queue"],
+                         dict(size=1, peak=5, capacity=5, discarded=6))
+        self.metrics.capture_snapshot(dict(received=2, discarded=1, queue_discarded=1,
+                                           size=0, peak=2, capacity=5))
+        self.metrics.report(final=True)
+        summary = self.payload()
+        self.assertEqual(summary["frames_received"], 2)
+        self.assertEqual(summary["frames_discarded"], 1)
+        self.assertEqual(summary["frame_queue"],
+                         dict(size=0, peak=2, capacity=5, discarded=1))
+
     def make_reader(self, recognition):
         reader = PlateReader.__new__(PlateReader)
         reader.device = "cpu"

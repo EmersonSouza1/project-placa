@@ -235,3 +235,31 @@ container foi iniciado ou reconfigurado. A validação usa placeholders.
 Sem ensaio de câmera, modelos reais ou benchmark; testes com dublês não validam
 precisão do tracking em baixa cadência nem ausência de backlog. API/contrato e
 persistência não foram alterados.
+
+## Evidência T03 — Fila limitada, 13/09/2026
+
+Executado no Windows/PowerShell, a partir de `services/vision`:
+
+```powershell
+uv run --no-project --python 3.11 python -m unittest discover -s tests -v
+```
+
+**72 testes passaram** em aproximadamente 2,3 segundos. Os 14 novos testes
+cobrem capacidade/configuração, saturação e descarte, FIFO para arquivos, captura
+durante inferência bloqueada, timestamp/sessão originais, reconexão, métricas entre
+janelas, erros sanitizados e shutdown em fila cheia ou leitura em andamento.
+
+Os testes concorrentes usam threads reais com eventos de sincronização e captura/
+inferência substituídas. No cenário de sobrecarga integrado, 21 frames chegam,
+2 são processados e 19 descartados; a fila não excede 5 e os timestamps entregues
+são 101 e 121. Outro cenário verifica nova visita após reconexão, mesmo `stream_id`
+e tracker recriado. Testes antigos de semântica RTSP usam leitura passo a passo
+para não depender do escalonamento; arquivos e os cenários concorrentes usam o
+leitor com thread real.
+
+Na raiz, `docker compose --env-file .env.example config --quiet` passou. Nenhum
+container foi iniciado/reconfigurado e o `.env` real não foi alterado.
+
+Sem câmera/modelos reais, benchmark, medição de memória do processo ou integração
+.NET/PostgreSQL nesta mudança. A fila é limitada por construção e por testes;
+isso não comprova latência, precisão de tracking ou limites dos buffers nativos.

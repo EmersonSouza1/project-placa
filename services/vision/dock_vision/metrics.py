@@ -22,13 +22,24 @@ class PipelineMetrics:
         self.interval_seconds, self.sample_limit = interval_seconds, sample_limit
         self.clock = clock
         self.started_at = clock()
+        self.queue_size = self.queue_capacity = 0
         self._reset()
 
     def _reset(self):
         self.frames_received = self.frames_processed = self.frames_discarded = 0
+        self.queue_discarded = 0
+        self.queue_peak = self.queue_size
         self.timings = {stage: dict(calls=0, errors=0, total_ms=0.0,
                                   samples=deque(maxlen=self.sample_limit))
                         for stage in self.STAGES}
+
+    def capture_snapshot(self, snapshot):
+        self.frames_received += snapshot["received"]
+        self.frames_discarded += snapshot["discarded"]
+        self.queue_discarded += snapshot["queue_discarded"]
+        self.queue_size = snapshot["size"]
+        self.queue_peak = max(self.queue_peak, snapshot["peak"])
+        self.queue_capacity = snapshot["capacity"]
 
     @contextmanager
     def measure(self, stage):
@@ -66,6 +77,8 @@ class PipelineMetrics:
                        frames_discarded=self.frames_discarded,
                        received_fps=round(self.frames_received / elapsed, 3) if elapsed else 0.0,
                        processed_fps=round(self.frames_processed / elapsed, 3) if elapsed else 0.0,
+                       frame_queue=dict(size=self.queue_size, peak=self.queue_peak,
+                                        capacity=self.queue_capacity, discarded=self.queue_discarded),
                        stages=stages)
         self.logger.info("%s", json.dumps(payload, allow_nan=False))
         self.started_at = now

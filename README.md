@@ -247,6 +247,7 @@ para YOLO/ByteTrack. Descartes aparecem nos logs `pipeline_metrics`; placa/OCR,
 quando habilitado, roda a cada quinto frame processado. A taxa pode ser ajustada
 no `.env`. Simulação e diagnóstico `ocr_test` mantêm seus comportamentos.
 
-A captura ainda é síncrona: reduzir inferências não garante eliminar atraso
-interno da câmera. Consulte [operação](.ia/operacao.md) para timestamps, fallback
-de FPS, métricas e limites desta etapa.
+A captura usa um thread separado e `FRAME_QUEUE_SIZE=5` limita os frames pendentes.
+Em RTSP, o consumidor prioriza o mais recente; arquivos aguardam espaço para
+preservar a reprodução. Consulte [operação](.ia/operacao.md) para timestamps,
+métricas, encerramento e limitações dos buffers internos da câmera.

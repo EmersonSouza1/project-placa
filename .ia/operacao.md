@@ -210,8 +210,9 @@ docker compose logs -f vision
 
 O resumo é verificado entre iterações, aproximadamente a cada 30 segundos, e
 emitido novamente na limpeza final do pipeline, inclusive após erro de inferência.
-Uma captura/inferência bloqueada pode atrasar o resumo; não existe thread de
-telemetria. Falhas durante a inicialização dos modelos não geram resumo final.
+Uma abertura de câmera ou inferência bloqueada pode atrasar o resumo. Durante
+espera por frames, o consumidor continua verificando o intervalo; não existe
+thread de telemetria. Falhas durante a inicialização dos modelos não geram resumo final.
 
 Cada resumo cobre o intervalo desde o anterior (o primeiro inclui a inicialização
 dos modelos). Contadores e amostras reiniciam após a emissão. Os campos são:
@@ -220,7 +221,7 @@ dos modelos). Contadores e amostras reiniciam após a emissão. Os campos são:
 |---|---|
 | `frames_received` | Leituras com `ok=True`, incluindo imagem inválida |
 | `frames_processed` | Frames enviados a `model.track`, incluindo chamadas que falharam |
-| `frames_discarded` | Leituras bem-sucedidas descartadas por sampling, imagem inválida ou encerramento antes da inferência |
+| `frames_discarded` | Leituras bem-sucedidas descartadas por sampling, fila, imagem inválida ou encerramento antes da inferência |
 | `received_fps` / `processed_fps` | Contadores divididos pelo tempo real decorrido no intervalo |
 | `interval_seconds` / `final` | Duração da janela e indicação de resumo final |
 | `stages` | Estatísticas de `vehicle_tracking`, `plate_detection` e `ocr` |
@@ -237,9 +238,9 @@ detector e associação. OCR inclui o consumo do gerador de resultados, não ape
 sua criação. Os tempos usam relógio monotônico e não alteram horários de eventos.
 
 Esses FPS medem leitura/processamento pela aplicação, não o FPS nativo da câmera:
-o loop síncrono ainda não consegue observar descartes internos do driver/FFmpeg.
+a aplicação não observa descartes internos do driver/FFmpeg.
 `ok=False` (inclusive fim de arquivo) não conta como frame recebido/descartado.
-Sampling foi acrescentado na T02. Ainda não há filas no modo `video`, métricas
+Sampling foi acrescentado na T02 e a fila de captura na T03. Ainda não há métricas
 de CPU/memória, contagem de OCR por visita ou instrumentação de `ocr_test`. Com `OCR_ENABLED=false`,
 as etapas de placa/OCR continuam com zero chamadas. Não há URL, imagem ou placa
 no payload das métricas.
@@ -275,7 +276,49 @@ Placa/OCR continua a cada quinto frame **processado**, para evitar que o samplin
 elimine todas as oportunidades de OCR por coincidência de índices. A captura por
 visita ainda será implementada em T06.
 
-Esta etapa reduz chamadas de inferência, mas ainda lê e decodifica frames em loop
-síncrono. Buffers internos podem acumular atraso durante inferência lenta: a fila
-de frame recente e captura desacoplada pertencem à T03. Não há evidência de ganho
-de CPU/latência com câmera real nesta etapa.
+O sampling reduz chamadas de inferência; a T03 separou a leitura/decodificação em
+outro thread. Isso limita a fila da aplicação, mas não comprova ganho de CPU ou
+latência em câmera real nem controla buffers internos do driver.
+
+## Fila de captura (T03)
+
+Configure `FRAME_QUEUE_SIZE=5` no `.env`. O Compose repassa o valor ao modo
+`video`; deve ser um inteiro positivo. Configuração inválida falha antes de
+carregar modelos. A capacidade limita frames pendentes, não bytes: além da fila,
+podem existir um frame no produtor, outro em inferência e buffers nativos.
+
+Em RTSP, leitura e sampling continuam enquanto a inferência trabalha. A fila
+cheia elimina o frame mais antigo; ao consumir, somente o mais recente é
+processado. Frames descartados não geram ausência no domínio. O timestamp é
+capturado na leitura, nunca substituído pelo horário de retirada da fila.
+
+Em arquivos, a fila é limitada, mas aguarda espaço com checagens de encerramento.
+O consumidor processa os frames amostrados em ordem, preservando o tempo de mídia
+e os testes reproduzíveis. Não há tentativa de reproduzir arquivo em tempo real.
+
+O objeto `frame_queue` no log `pipeline_metrics` acrescenta:
+
+| Campo | Significado |
+|---|---|
+| `size` | Ocupação no último snapshot |
+| `peak` | Maior ocupação observada na janela |
+| `capacity` | Limite configurado; zero antes de existir uma fila |
+| `discarded` | Frames eliminados por substituição, preferência pelo mais recente ou fechamento da fila |
+
+Esses descartes também entram em `frames_discarded`; não some os dois valores.
+Contadores da captura são transferidos atomicamente para as métricas, sem coletar
+dados de imagem/URL. Como frames podem atravessar janelas de log, recebidos,
+processados e descartados não precisam fechar na mesma janela. Ao encerrar
+normalmente, a fila fica vazia e os totais das janelas podem ser reconciliados.
+
+Fechamento usa sinalização fora da fila: fila cheia não impede informar fim de
+captura. O encerramento cancela esperas por espaço, limpa pendências e aguarda até
+6 segundos pelo thread. Somente o produtor libera OpenCV. Se uma chamada nativa
+ignorar os timeouts e não terminar, o pipeline falha e não cria outro leitor; o
+thread daemon não é encerrado à força. Nesse caso excepcional, as métricas finais
+podem não incluir atividade nativa que termine posteriormente.
+
+A inferência em andamento ainda precisa retornar antes que o consumidor execute
+sua limpeza. Portanto, não há garantia de shutdown total em 6 segundos. Os
+timeouts de abertura/leitura continuam em 5 segundos e dependem do backend.
+OCR ainda compartilha o thread de tracking; separá-los pertence à T09.
