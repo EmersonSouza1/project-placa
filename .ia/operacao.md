@@ -322,3 +322,10 @@ A inferência em andamento ainda precisa retornar antes que o consumidor execute
 sua limpeza. Portanto, não há garantia de shutdown total em 6 segundos. Os
 timeouts de abertura/leitura continuam em 5 segundos e dependem do backend.
 OCR ainda compartilha o thread de tracking; separá-los pertence à T09.
+
+
+## ROI de processamento (T04)
+
+`PROCESSING_ROI` limita a imagem enviada ao YOLO/ByteTrack sem alterar a zona lógica da doca. O formato é `left,top,right,bottom`, com quatro coordenadas normalizadas entre 0 e 1; vazio mantém o frame completo. Exemplo: `PROCESSING_ROI=0.15,0.10,0.90,0.95`.
+
+A ROI é um retângulo de otimização: tudo fora dela fica invisível para a inferência. A zona da doca continua sendo o polígono de `config/zone.json` e determina entrada/saída. As caixas retornadas pelo tracker no recorte são transladadas ao frame completo antes de normalizar o centro inferior, aplicar a zona e recortar o veículo para leitura de placa. Configuração inválida interrompe a inicialização antes de carregar OpenCV e modelos. Uma ROI mal calibrada pode ocultar veículos ou transições e deve ser validada com vídeo anotado.
