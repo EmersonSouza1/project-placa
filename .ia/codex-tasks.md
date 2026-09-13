@@ -16,6 +16,8 @@ Execute uma tarefa por vez. Não antecipe infraestrutura de fases futuras. Para 
 
 ## T01 — Baseline de métricas
 
+**Status:** concluída em 13/09/2026. Contadores, durações e logs periódicos/finais implementados no modo de vídeo; 46 testes Python passaram. Evidência em [Testes](testes.md). Benchmark real permanece em T10.
+
 **Objetivo:** tornar o custo atual mensurável.
 
 Implementar contadores e tempos do pipeline de visão sem alterar o contrato da API.

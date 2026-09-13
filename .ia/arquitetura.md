@@ -104,3 +104,17 @@ O Dockerfile Python tem estágios `simulation` e `inference`. O primeiro não in
 IA; o segundo instala o extra `vision`. A configuração inicial usa CPU. `DEVICE`
 é repassado aos detectores YOLO, mas o PaddleOCR está explicitamente em CPU;
 o Compose não configura acesso a GPU.
+
+
+## Baseline de métricas (T01)
+
+O módulo [metrics.py](../services/vision/dock_vision/metrics.py), dependente somente
+da biblioteca padrão, recebe contadores e durações do modo `video`.
+O pipeline mede conjuntamente YOLO/ByteTrack; `PlateReader` mede separadamente
+detecção de placa e execução completa do OCR. Logs JSON periódicos e finais
+permitem comparar chamadas, falhas, FPS observado, média e p95. Cada etapa
+armazena no máximo 512 durações; média e contagem abrangem toda a janela.
+
+A instrumentação não muda cadência de inferência, domínio, outbox ou contrato
+HTTP. Simulação e diagnóstico `ocr_test` preservam seus fluxos. A semântica dos
+contadores e as limitações estão em [Operação](operacao.md).

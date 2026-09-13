@@ -174,6 +174,45 @@ class PipelineTests(unittest.TestCase):
         self.wait.assert_not_called()
         capture.release.assert_called_once()
 
+    def metrics_summary(self, logs):
+        import json
+        return [json.loads(line[line.index("{"):]) for line in logs
+                if '"event": "pipeline_metrics"' in line][-1]
+
+    def test_metrics_count_processed_frames_with_ocr_disabled(self):
+        logs = self.run_capture([self.timed_capture(["inside", "inside", None])])
+        summary = self.metrics_summary(logs)
+        self.assertEqual(summary["frames_received"], 3)
+        self.assertEqual(summary["frames_processed"], 3)
+        self.assertEqual(summary["frames_discarded"], 0)
+        self.assertEqual(summary["stages"]["vehicle_tracking"]["calls"], 3)
+        self.assertEqual(summary["stages"]["ocr"]["calls"], 0)
+        self.assertTrue(summary["final"])
+        self.assertEqual(summary["stream_id"], self.zone.stream_id)
+
+    def test_metrics_count_invalid_frame_but_not_failed_read(self):
+        for images, received in (([SimpleNamespace(size=0)], 1), ([], 0)):
+            with self.subTest(received=received):
+                self.stop.clear()
+                summary = self.metrics_summary(self.run_capture([Capture(images)]))
+                self.assertEqual(summary["frames_received"], received)
+                self.assertEqual(summary["frames_discarded"], received)
+                self.assertEqual(summary["frames_processed"], 0)
+
+    def test_metrics_final_report_on_vehicle_failure(self):
+        self.yolo.side_effect = lambda _: Mock(track=Mock(side_effect=RuntimeError("failed")))
+        capture = Capture([frame()])
+        self.cv.VideoCapture.return_value = capture
+        with self.assertLogs("dock_vision.pipeline", "INFO") as logs:
+            with self.assertRaises(RuntimeError):
+                run_video(self.zone, self.events.append, self.stop)
+        summary = self.metrics_summary(logs.output)
+        self.assertEqual(summary["frames_processed"], 1)
+        self.assertEqual(summary["stages"]["vehicle_tracking"]["errors"], 1)
+        self.assertTrue(summary["final"])
+        capture.release.assert_called_once()
+
+
     def timed_capture(self, positions, **kwargs):
         capture = Capture([frame(p) for p in positions], **kwargs)
         read = capture.read

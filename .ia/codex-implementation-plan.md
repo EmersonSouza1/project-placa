@@ -44,6 +44,8 @@ flowchart TD
 
 ### Fase 1 — Medição e observabilidade
 
+Status em 13/09/2026: baseline T01 implementada com contadores de frames, FPS observado e chamadas/erros/média/p95 de veículo+tracking, placa e OCR. 46 testes passaram. Isso não conclui todas as métricas desejadas abaixo: FPS nativo, filas, veículos rastreados, OCR por visita e CPU/memória ainda não são medidos. Medição real comparativa permanece pendente de T10.
+
 Antes de otimizar, medir o comportamento atual.
 
 Implementar métricas locais no serviço de visão:

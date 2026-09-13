@@ -192,3 +192,24 @@ SLA para o processo inteiro. Uma cena sem veículos comprova somente a captura.
 Ainda não há metas numéricas de aceitação acordadas. Defina-as com os responsáveis
 pela operação antes de declarar a POC validada. Simulação aprovada não mede
 precisão de detecção, estabilidade de tracking ou acurácia do OCR.
+
+
+## Evidência T01 — Baseline de métricas, 13/09/2026
+
+No Windows/PowerShell, a partir de `services/vision`, foi executado:
+
+```powershell
+uv run --no-project --python 3.11 python -m unittest discover -s tests -v
+```
+
+Resultado: **46 testes passaram** em aproximadamente 2,2 segundos, incluindo
+10 novos testes. `test_metrics.py` cobre periodicidade, reset da janela, FPS,
+média, p95 nearest-rank, limite de memória, validação de parâmetros, falhas e
+temporização do gerador de OCR. `test_pipeline.py` também verifica contagem de
+frames inválidos/processados, OCR desabilitado e resumo final em erro de YOLO.
+Os testes existentes de domínio, simulação, outbox, reconexão e diagnóstico
+continuam passando sem bibliotecas de inferência.
+
+Não foram executados benchmark, câmera/modelos reais ou integração .NET/PostgreSQL
+nesta mudança. Os testes usam relógios/inferências substituídos e não demonstram
+ganho de desempenho ou precisão. Contrato HTTP, API e persistência não mudaram.

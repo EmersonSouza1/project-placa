@@ -196,3 +196,50 @@ uma intervenção específica no SQLite pode repor `state='pending'` e
 A API não possui autenticação e está publicada somente em `127.0.0.1`. PostgreSQL
 não publica porta no host. Mantenha credenciais fora da documentação e considere
 que bibliotecas de captura podem produzir logs próprios ao diagnosticar RTSP.
+
+
+## Métricas locais do pipeline de vídeo (T01)
+
+Em `SOURCE_MODE=video`, a mensagem de log é um objeto JSON com
+`event=pipeline_metrics`, `camera_id` e `stream_id`. O formato padrão do logger
+mantém seu prefixo de data/nível antes desse JSON. Para acompanhar no Compose:
+
+```powershell
+docker compose logs -f vision
+```
+
+O resumo é verificado entre iterações, aproximadamente a cada 30 segundos, e
+emitido novamente na limpeza final do pipeline, inclusive após erro de inferência.
+Uma captura/inferência bloqueada pode atrasar o resumo; não existe thread de
+telemetria. Falhas durante a inicialização dos modelos não geram resumo final.
+
+Cada resumo cobre o intervalo desde o anterior (o primeiro inclui a inicialização
+dos modelos). Contadores e amostras reiniciam após a emissão. Os campos são:
+
+| Campo | Significado |
+|---|---|
+| `frames_received` | Leituras com `ok=True`, incluindo imagem inválida |
+| `frames_processed` | Frames enviados a `model.track`, incluindo chamadas que falharam |
+| `frames_discarded` | Leituras bem-sucedidas descartadas por imagem inválida ou encerramento antes da inferência |
+| `received_fps` / `processed_fps` | Contadores divididos pelo tempo real decorrido no intervalo |
+| `interval_seconds` / `final` | Duração da janela e indicação de resumo final |
+| `stages` | Estatísticas de `vehicle_tracking`, `plate_detection` e `ocr` |
+
+Cada etapa informa `calls`, `errors`, `mean_ms`, `p95_ms` e `sample_count`.
+A média abrange todas as chamadas do intervalo. O p95 usa nearest-rank:
+ordena as últimas até 512 durações da etapa e seleciona a posição
+`ceil(0.95 * n)`, com posição inicial 1. Portanto, em janelas com mais de
+512 chamadas, o p95 representa apenas as amostras mais recentes. Sem chamadas,
+média e p95 são `null`. Uma chamada que falha também entra no tempo e no contador.
+
+A etapa `vehicle_tracking` mede a chamada YOLO/ByteTrack completa; não separa
+detector e associação. OCR inclui o consumo do gerador de resultados, não apenas
+sua criação. Os tempos usam relógio monotônico e não alteram horários de eventos.
+
+Esses FPS medem leitura/processamento pela aplicação, não o FPS nativo da câmera:
+o loop síncrono ainda não consegue observar descartes internos do driver/FFmpeg.
+`ok=False` (inclusive fim de arquivo) não conta como frame recebido/descartado.
+Esta etapa não implementa sampling, filas, métricas de CPU/memória, contagem de OCR
+por visita ou instrumentação do diagnóstico `ocr_test`. Com `OCR_ENABLED=false`,
+as etapas de placa/OCR continuam com zero chamadas. Não há URL, imagem ou placa
+no payload das métricas.

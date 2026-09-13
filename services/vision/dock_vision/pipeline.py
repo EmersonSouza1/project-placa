@@ -5,11 +5,13 @@ from pathlib import Path
 import time
 from urllib.parse import urlsplit
 
+from .metrics import PipelineMetrics
+
 log = logging.getLogger(__name__)
 
 
 class PlateReader:
-    def __init__(self, model_path, device):
+    def __init__(self, model_path, device, metrics):
         if not Path(model_path).is_file():
             raise ValueError("PLATE_MODEL must point to trained plate detection weights")
         from ultralytics import YOLO
@@ -17,6 +19,7 @@ class PlateReader:
         self.detector = YOLO(model_path)
         self.reader = TextRecognition(model_name="en_PP-OCRv4_mobile_rec", device="cpu")
         self.device = device
+        self.metrics = metrics
 
     def read(self, frame, bounds):
         height, width = frame.shape[:2]
@@ -24,7 +27,8 @@ class PlateReader:
         crop = frame[max(0, int(y1)):min(height, int(y2)), max(0, int(x1)):min(width, int(x2))]
         if not crop.size:
             return []
-        result = self.detector.predict(crop, conf=0.4, device=self.device, verbose=False)[0]
+        with self.metrics.measure("plate_detection"):
+            result = self.detector.predict(crop, conf=0.4, device=self.device, verbose=False)[0]
         candidates = []
         for box in result.boxes:
             px1, py1, px2, py2 = box.xyxy[0].tolist()
@@ -32,8 +36,9 @@ class PlateReader:
                          max(0, int(px1)):min(crop.shape[1], int(px2))]
             if not plate.size:
                 continue
-            for recognition in self.reader.predict(input=plate, batch_size=1):
-                candidates.append((str(recognition["rec_text"]), float(recognition["rec_score"])))
+            with self.metrics.measure("ocr"):
+                for recognition in self.reader.predict(input=plate, batch_size=1):
+                    candidates.append((str(recognition["rec_text"]), float(recognition["rec_score"])))
         # Only one vote per vehicle per frame: overlapping boxes must not inflate consensus.
         return [max(candidates, key=lambda item: item[1])] if candidates else []
 
@@ -73,12 +78,14 @@ def run_video(processor, emit, stop):
         return
     device = os.environ.get("DEVICE", "cpu")
     vehicle_weights = os.environ.get("VEHICLE_MODEL", "yolo11n.pt")
-    reader = PlateReader(os.environ.get("PLATE_MODEL", "/models/plate.pt"), device) if os.environ.get("OCR_ENABLED", "false").lower() == "true" else None
+    metrics = PipelineMetrics(log, processor.camera_id, processor.stream_id)
+    reader = PlateReader(os.environ.get("PLATE_MODEL", "/models/plate.pt"), device, metrics) if os.environ.get("OCR_ENABLED", "false").lower() == "true" else None
     model = YOLO(vehicle_weights)
     capture = None
     last_timestamp = time.time()
     try:
         while not stop.is_set():
+            metrics.report()
             # Timeouts prevent an unreachable RTSP source from hanging forever.
             try:
                 capture = cv2.VideoCapture(source, cv2.CAP_FFMPEG, [
@@ -103,16 +110,24 @@ def run_video(processor, emit, stop):
                 fps = 25
             frame_number, started_at = 0, time.time()
             while not stop.is_set():
+                metrics.report()
                 try:
                     ok, frame = capture.read()
                 except cv2.error:
                     ok, frame = False, None
+                if ok:
+                    metrics.frames_received += 1
                 if stop.is_set():
+                    if ok:
+                        metrics.frames_discarded += 1
                     break
                 if not ok or frame is None or not frame.size:
+                    if ok:
+                        metrics.frames_discarded += 1
                     break
                 height, width = frame.shape[:2]
                 if not height or not width:
+                    metrics.frames_discarded += 1
                     break
                 if frame_number == 0:
                     log.info("First frame received camera_id=%s width=%s height=%s",
@@ -120,8 +135,10 @@ def run_video(processor, emit, stop):
                 # Files use media time, not CPU inference time, for deterministic dwell.
                 last_timestamp = time.time() if live else started_at + frame_number / fps
                 frame_number += 1
-                result = model.track(frame, persist=True, tracker="bytetrack.yaml", classes=[2, 3, 5, 7],
-                                     conf=0.25, device=device, verbose=False)[0]
+                metrics.frames_processed += 1
+                with metrics.measure("vehicle_tracking"):
+                    result = model.track(frame, persist=True, tracker="bytetrack.yaml", classes=[2, 3, 5, 7],
+                                         conf=0.25, device=device, verbose=False)[0]
                 seen = set()
                 if result.boxes.id is not None:
                     for box in result.boxes:
@@ -154,7 +171,10 @@ def run_video(processor, emit, stop):
             # A new tracker cannot inherit IDs/state across camera reconnection.
             model = YOLO(vehicle_weights)
     finally:
-        if capture is not None:
-            capture.release()
-        for event in processor.interrupt(last_timestamp if not live else time.time()):
-            emit(event)
+        try:
+            if capture is not None:
+                capture.release()
+            for event in processor.interrupt(last_timestamp if not live else time.time()):
+                emit(event)
+        finally:
+            metrics.report(final=True)
