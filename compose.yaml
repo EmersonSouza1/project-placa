@@ -1,0 +1,58 @@
+services:
+  postgres:
+    image: postgres:17
+    environment:
+      POSTGRES_DB: docks
+      POSTGRES_USER: docks
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Copy .env.example to .env first}
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: [CMD-SHELL, pg_isready -U docks -d docks]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  api:
+    build: ./services/api
+    environment:
+      ConnectionStrings__Database: Host=postgres;Database=docks;Username=docks;Password=${POSTGRES_PASSWORD}
+      ASPNETCORE_URLS: http://+:8080
+    ports:
+      - "127.0.0.1:${API_PORT:-5080}:8080"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: unless-stopped
+
+  vision:
+    build:
+      context: ./services/vision
+      target: ${VISION_BUILD_TARGET:-simulation}
+    environment:
+      SOURCE_MODE: ${SOURCE_MODE:-simulation}
+      VIDEO_SOURCE: ${VIDEO_SOURCE:-}
+      CAMERA_ID: ${CAMERA_ID:-camera-01}
+      DOCK_ID: ${DOCK_ID:-dock-01}
+      ZONE_PATH: ${ZONE_PATH:-/config/zone.json}
+      VEHICLE_MODEL: ${VEHICLE_MODEL:-yolo11n.pt}
+      OCR_ENABLED: ${OCR_ENABLED:-false}
+      PLATE_MODEL: ${PLATE_MODEL:-/models/plate.pt}
+      DEVICE: ${DEVICE:-cpu}
+      EVENTS_URL: http://api:8080/dock-events
+      OCR_OBSERVATIONS_URL: http://api:8080/ocr-observations
+      OUTBOX_PATH: /data/outbox.sqlite3
+      YOLO_CONFIG_DIR: /data/ultralytics
+      PADDLE_PDX_CACHE_HOME: /data/paddlex
+    volumes:
+      - ./config:/config:ro
+      - ./models:/models:ro
+      - ./data/videos:/videos:ro
+      - vision-data:/data
+    depends_on:
+      - api
+    restart: "on-failure"
+
+volumes:
+  postgres-data:
+  vision-data:

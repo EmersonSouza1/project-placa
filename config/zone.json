@@ -1,0 +1,8 @@
+{
+  "polygon": [[0.3, 0.3], [0.8, 0.3], [0.8, 0.9], [0.3, 0.9]],
+  "confirmation_seconds": 1.0,
+  "lost_after_seconds": 5.0,
+  "minimum_plate_observations": 2,
+  "minimum_plate_confidence": 0.7
+}
+
