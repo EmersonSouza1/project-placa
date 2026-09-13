@@ -8,6 +8,7 @@ from time import monotonic
 
 from .metrics import PipelineMetrics
 from .sampling import FrameSampler
+from .roi import ProcessingRoi
 from .stream_reader import StreamReader, queue_capacity
 
 log = logging.getLogger(__name__)
@@ -75,6 +76,7 @@ def run_video(processor, emit, stop):
     live = validate_source(source)
     process_fps = os.environ.get("PROCESS_FPS", "3")
     FrameSampler(process_fps)  # Validate configuration before loading models.
+    processing_roi = ProcessingRoi.parse(os.environ.get("PROCESSING_ROI", ""))
     capacity = queue_capacity(os.environ.get("FRAME_QUEUE_SIZE", "5"))
 
     import cv2
@@ -130,10 +132,11 @@ def run_video(processor, emit, stop):
                         raise RuntimeError("Capture session mismatch")
                     frame, last_timestamp = packet.image, packet.timestamp
                     height, width = frame.shape[:2]
+                    inference_frame, roi_offset = processing_roi.crop(frame)
                     processed_number += 1
                     metrics.frames_processed += 1
                     with metrics.measure("vehicle_tracking"):
-                        result = model.track(frame, persist=True, tracker="bytetrack.yaml",
+                        result = model.track(inference_frame, persist=True, tracker="bytetrack.yaml",
                                              classes=[2, 3, 5, 7], conf=0.25,
                                              device=device, verbose=False)[0]
                     seen = set()
@@ -141,7 +144,8 @@ def run_video(processor, emit, stop):
                         for box in result.boxes:
                             track_id = int(box.id.item())
                             seen.add(track_id)
-                            bounds = box.xyxy[0].tolist()
+                            bounds = processing_roi.to_frame_bounds(
+                                box.xyxy[0].tolist(), roi_offset)
                             x1, _, x2, y2 = bounds
                             point = ((x1 + x2) / (2 * width), y2 / height)
                             readings = []
