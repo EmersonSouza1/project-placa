@@ -145,3 +145,10 @@ aguarda seu encerramento antes de reconectar; cada conexão recebe uma fila nova
 Frames pendentes são liberados no shutdown. A identidade interna de sessão não
 altera `stream_id`, `visit_id` ou o contrato HTTP. A proteção dos contadores usa
 uma condição/lock, e somente o consumidor agrega os snapshots em `PipelineMetrics`.
+
+
+## ROI de processamento (T04)
+
+`PROCESSING_ROI` limita a imagem enviada ao YOLO/ByteTrack sem alterar a zona lógica da doca. O formato é `left,top,right,bottom`, com quatro coordenadas normalizadas entre 0 e 1; vazio mantém o frame completo. Exemplo: `PROCESSING_ROI=0.15,0.10,0.90,0.95`.
+
+A ROI é um retângulo de otimização: tudo fora dela fica invisível para a inferência. A zona da doca continua sendo o polígono de `config/zone.json` e determina entrada/saída. As caixas retornadas pelo tracker no recorte são transladadas ao frame completo antes de normalizar o centro inferior, aplicar a zona e recortar o veículo para leitura de placa. Configuração inválida interrompe a inicialização antes de carregar OpenCV e modelos. Uma ROI mal calibrada pode ocultar veículos ou transições e deve ser validada com vídeo anotado.
