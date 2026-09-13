@@ -192,3 +192,74 @@ SLA para o processo inteiro. Uma cena sem veículos comprova somente a captura.
 Ainda não há metas numéricas de aceitação acordadas. Defina-as com os responsáveis
 pela operação antes de declarar a POC validada. Simulação aprovada não mede
 precisão de detecção, estabilidade de tracking ou acurácia do OCR.
+
+
+## Evidência T01 — Baseline de métricas, 13/09/2026
+
+No Windows/PowerShell, a partir de `services/vision`, foi executado:
+
+```powershell
+uv run --no-project --python 3.11 python -m unittest discover -s tests -v
+```
+
+Resultado: **46 testes passaram** em aproximadamente 2,2 segundos, incluindo
+10 novos testes. `test_metrics.py` cobre periodicidade, reset da janela, FPS,
+média, p95 nearest-rank, limite de memória, validação de parâmetros, falhas e
+temporização do gerador de OCR. `test_pipeline.py` também verifica contagem de
+frames inválidos/processados, OCR desabilitado e resumo final em erro de YOLO.
+Os testes existentes de domínio, simulação, outbox, reconexão e diagnóstico
+continuam passando sem bibliotecas de inferência.
+
+Não foram executados benchmark, câmera/modelos reais ou integração .NET/PostgreSQL
+nesta mudança. Os testes usam relógios/inferências substituídos e não demonstram
+ganho de desempenho ou precisão. Contrato HTTP, API e persistência não mudaram.
+
+## Evidência T02 — Frame sampling, 13/09/2026
+
+Executado em Windows/PowerShell, no diretório `services/vision`:
+
+```powershell
+uv run --no-project --python 3.11 python -m unittest discover -s tests -v
+```
+
+**58 testes passaram**, incluindo 12 novos. Os cenários cobrem seleção a partir
+de 25/30/60 FPS, taxa configurada, fonte lenta, ausência de compensação após pausa,
+validação antes de imports de inferência, FPS inválido/incorreto, posição de mídia
+repetida/regressiva/ausente, reconexão e independência entre seleção RTSP e relógio
+de parede. Um vídeo sintético de 210 frames a 30 FPS envia 21 frames ao detector,
+descarta 189 e preserva entrada/saída em 103/106 s, mesma visita e OCR posterior.
+
+Na raiz, `docker compose --env-file .env.example config --quiet` passou. Nenhum
+container foi iniciado ou reconfigurado. A validação usa placeholders.
+
+Sem ensaio de câmera, modelos reais ou benchmark; testes com dublês não validam
+precisão do tracking em baixa cadência nem ausência de backlog. API/contrato e
+persistência não foram alterados.
+
+## Evidência T03 — Fila limitada, 13/09/2026
+
+Executado no Windows/PowerShell, a partir de `services/vision`:
+
+```powershell
+uv run --no-project --python 3.11 python -m unittest discover -s tests -v
+```
+
+**72 testes passaram** em aproximadamente 2,3 segundos. Os 14 novos testes
+cobrem capacidade/configuração, saturação e descarte, FIFO para arquivos, captura
+durante inferência bloqueada, timestamp/sessão originais, reconexão, métricas entre
+janelas, erros sanitizados e shutdown em fila cheia ou leitura em andamento.
+
+Os testes concorrentes usam threads reais com eventos de sincronização e captura/
+inferência substituídas. No cenário de sobrecarga integrado, 21 frames chegam,
+2 são processados e 19 descartados; a fila não excede 5 e os timestamps entregues
+são 101 e 121. Outro cenário verifica nova visita após reconexão, mesmo `stream_id`
+e tracker recriado. Testes antigos de semântica RTSP usam leitura passo a passo
+para não depender do escalonamento; arquivos e os cenários concorrentes usam o
+leitor com thread real.
+
+Na raiz, `docker compose --env-file .env.example config --quiet` passou. Nenhum
+container foi iniciado/reconfigurado e o `.env` real não foi alterado.
+
+Sem câmera/modelos reais, benchmark, medição de memória do processo ou integração
+.NET/PostgreSQL nesta mudança. A fila é limitada por construção e por testes;
+isso não comprova latência, precisão de tracking ou limites dos buffers nativos.

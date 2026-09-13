@@ -44,6 +44,8 @@ flowchart TD
 
 ### Fase 1 — Medição e observabilidade
 
+Status em 13/09/2026: baseline T01 implementada com contadores de frames, FPS observado e chamadas/erros/média/p95 de veículo+tracking, placa e OCR. 46 testes passaram. Isso não conclui todas as métricas desejadas abaixo: FPS nativo, veículos rastreados, OCR por visita e CPU/memória ainda não são medidos. T03 acrescentou tamanho/pico/descartes da fila de captura. Medição real comparativa permanece pendente de T10.
+
 Antes de otimizar, medir o comportamento atual.
 
 Implementar métricas locais no serviço de visão:
@@ -66,6 +68,8 @@ Critério de aceite:
 - simulação continua funcionando sem dependências de visão.
 
 ### Fase 2 — Sampling de frames e filas limitadas
+
+Status em 13/09/2026: T02 concluída (`PROCESS_FPS`, seleção por tempo e métricas de descarte), com 58 testes Python aprovados. T03 também concluída: captura em thread, fila limitada com preferência por frames recentes em RTSP e espera por espaço em arquivos. A suíte agora tem 72 testes aprovados; ausência de atraso real ainda exige benchmark.
 
 Adicionar configuração de taxa de processamento separada da taxa nativa da câmera.
 

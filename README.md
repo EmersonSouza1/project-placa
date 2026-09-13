@@ -239,3 +239,15 @@ POC. PostgreSQL não expõe porta no host. O processamento não envia imagens a 
 externo. Revisar acesso e licenças dos modelos/dependências antes de distribuir ou
 expor o serviço. Broker, painel, armazenamento de imagens e Kubernetes ficam fora
 desta primeira versão.
+
+## Taxa de inferência de vídeo
+
+No modo `video`, `PROCESS_FPS=3` seleciona aproximadamente três frames por segundo
+para YOLO/ByteTrack. Descartes aparecem nos logs `pipeline_metrics`; placa/OCR,
+quando habilitado, roda a cada quinto frame processado. A taxa pode ser ajustada
+no `.env`. Simulação e diagnóstico `ocr_test` mantêm seus comportamentos.
+
+A captura usa um thread separado e `FRAME_QUEUE_SIZE=5` limita os frames pendentes.
+Em RTSP, o consumidor prioriza o mais recente; arquivos aguardam espaço para
+preservar a reprodução. Consulte [operação](.ia/operacao.md) para timestamps,
+métricas, encerramento e limitações dos buffers internos da câmera.

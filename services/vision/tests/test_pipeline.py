@@ -12,6 +12,7 @@ from unittest.mock import Mock, patch
 
 from dock_vision.domain import ZoneProcessor
 from dock_vision.pipeline import run_video, validate_source
+from dock_vision.stream_reader import StreamReader
 
 
 SOURCE = "rtsp://test-user:test-secret@camera.local:554/cam/realmonitor?channel=1&subtype=1"
@@ -39,20 +40,24 @@ def tracked(image, **kwargs):
 
 
 class Capture:
-    def __init__(self, images=(), opened=True, fps=1, end=None):
+    def __init__(self, images=(), opened=True, fps=1, end=None, timestamps=None):
         self.images = iter(images)
+        self.timestamps, self.index = timestamps, -1
         self.opened, self.fps, self.end = opened, fps, end
         self.release = Mock()
 
     def isOpened(self):
         return self.opened
 
-    def get(self, _):
+    def get(self, prop):
+        if prop == 5:
+            return self.timestamps[self.index] if self.timestamps is not None else 0
         return self.fps
 
     def read(self):
         try:
             image = next(self.images)
+            self.index += 1
         except StopIteration:
             if self.end:
                 self.end()
@@ -60,6 +65,28 @@ class Capture:
         if isinstance(image, Exception):
             raise image
         return True, image
+
+
+class InlineLiveReader(StreamReader):
+    """Step source reads deterministically for existing business-rule adapter tests.
+
+    Threading and overload use the real reader in test_stream_reader and the
+    dedicated concurrent pipeline test.
+    """
+    def start(self):
+        self.iterator = self._frames()
+
+    def get(self, timeout=0.2):
+        try:
+            return next(self.iterator)
+        except StopIteration:
+            self.finished = True
+            return None
+
+    def close(self, timeout=6):
+        self.iterator.close()
+        self.capture.release()
+        self.finished = True
 
 
 class SourceTests(unittest.TestCase):
@@ -97,9 +124,10 @@ class PipelineTests(unittest.TestCase):
         self.stop = Event()
         self.wait = self.stack.enter_context(patch.object(self.stop, "wait", side_effect=self.finish_wait))
         self.clock = SimpleNamespace(now=100.0)
+        self.stack.enter_context(patch("dock_vision.pipeline.monotonic", lambda: self.clock.now))
         self.stack.enter_context(patch("dock_vision.pipeline.time", SimpleNamespace(time=lambda: self.clock.now)))
         self.cv = SimpleNamespace(CAP_FFMPEG=1, CAP_PROP_OPEN_TIMEOUT_MSEC=2,
-                                  CAP_PROP_READ_TIMEOUT_MSEC=3, CAP_PROP_FPS=4,
+                                  CAP_PROP_READ_TIMEOUT_MSEC=3, CAP_PROP_FPS=4, CAP_PROP_POS_MSEC=5,
                                   error=type("CaptureError", (Exception,), {}), VideoCapture=Mock())
         self.models = []
 
@@ -114,6 +142,8 @@ class PipelineTests(unittest.TestCase):
         self.stack.enter_context(patch.dict(os.environ, {"VIDEO_SOURCE": SOURCE,
                                                        "OCR_ENABLED": "false"}, clear=True))
         self.reader = self.stack.enter_context(patch("dock_vision.pipeline.PlateReader"))
+        self.stack.enter_context(patch("dock_vision.pipeline.StreamReader",
+            side_effect=lambda *args, **kwargs: (InlineLiveReader if args[2] else StreamReader)(*args, **kwargs)))
 
     def finish_wait(self, seconds):
         self.stop.set()
@@ -173,6 +203,203 @@ class PipelineTests(unittest.TestCase):
         self.reader.assert_not_called()
         self.wait.assert_not_called()
         capture.release.assert_called_once()
+
+    def metrics_summary(self, logs):
+        import json
+        return [json.loads(line[line.index("{"):]) for line in logs
+                if '"event": "pipeline_metrics"' in line][-1]
+
+    def test_metrics_count_processed_frames_with_ocr_disabled(self):
+        logs = self.run_capture([self.timed_capture(["inside", "inside", None])])
+        summary = self.metrics_summary(logs)
+        self.assertEqual(summary["frames_received"], 3)
+        self.assertEqual(summary["frames_processed"], 3)
+        self.assertEqual(summary["frames_discarded"], 0)
+        self.assertEqual(summary["stages"]["vehicle_tracking"]["calls"], 3)
+        self.assertEqual(summary["stages"]["ocr"]["calls"], 0)
+        self.assertTrue(summary["final"])
+        self.assertEqual(summary["stream_id"], self.zone.stream_id)
+
+    def test_metrics_count_invalid_frame_but_not_failed_read(self):
+        for images, received in (([SimpleNamespace(size=0)], 1), ([], 0)):
+            with self.subTest(received=received):
+                self.stop.clear()
+                summary = self.metrics_summary(self.run_capture([Capture(images)]))
+                self.assertEqual(summary["frames_received"], received)
+                self.assertEqual(summary["frames_discarded"], received)
+                self.assertEqual(summary["frames_processed"], 0)
+
+    def test_metrics_final_report_on_vehicle_failure(self):
+        self.yolo.side_effect = lambda _: Mock(track=Mock(side_effect=RuntimeError("failed")))
+        capture = Capture([frame()])
+        self.cv.VideoCapture.return_value = capture
+        with self.assertLogs("dock_vision.pipeline", "INFO") as logs:
+            with self.assertRaises(RuntimeError):
+                run_video(self.zone, self.events.append, self.stop)
+        summary = self.metrics_summary(logs.output)
+        self.assertEqual(summary["frames_processed"], 1)
+        self.assertEqual(summary["stages"]["vehicle_tracking"]["errors"], 1)
+        self.assertTrue(summary["final"])
+        capture.release.assert_called_once()
+
+
+    def test_process_fps_validation_before_inference_imports(self):
+        with patch.dict(os.environ, PROCESS_FPS="nan"), \
+                patch.dict(sys.modules, {"cv2": None, "ultralytics": None}):
+            with self.assertRaisesRegex(ValueError, "PROCESS_FPS"):
+                run_video(self.zone, self.events.append, self.stop)
+
+    def test_sampled_file_preserves_events_media_time_and_ocr(self):
+        positions = ["outside"] * 60 + ["inside"] * 90 + ["outside"] * 60
+        capture = Capture([frame(p) for p in positions], fps=30,
+                          timestamps=[i * 1000 / 30 for i in range(len(positions))])
+        self.reader.return_value.read.return_value = [("ABC1234", 0.9)]
+        with tempfile.TemporaryDirectory() as directory, patch.dict(os.environ, OCR_ENABLED="true"):
+            path = Path(directory) / "video.mp4"
+            path.touch()
+            summary = self.metrics_summary(self.run_capture([capture], str(path)))
+        self.assertEqual(summary["frames_received"], 210)
+        self.assertEqual(summary["frames_processed"], 21)
+        self.assertEqual(summary["frames_discarded"], 189)
+        self.assertEqual([e["event_type"] for e in self.events], ["entered", "exited"])
+        self.assertEqual(self.events[0]["visit_id"], self.events[1]["visit_id"])
+        self.assertAlmostEqual(datetime.fromisoformat(self.events[0]["occurred_at"]).timestamp(), 103)
+        self.assertAlmostEqual(datetime.fromisoformat(self.events[1]["occurred_at"]).timestamp(), 106)
+        self.assertEqual(self.reader.return_value.read.call_count, 4)
+        self.assertEqual(self.events[-1]["plate"], "ABC1234")
+
+    def test_rtsp_sampling_ignores_reported_fps_and_wall_clock_jumps(self):
+        self.stack.enter_context(patch("dock_vision.pipeline.monotonic",
+                                      side_effect=[i / 30 for i in range(30)]))
+        capture = self.timed_capture(["outside"] * 30, fps=float("nan"))
+        summary = self.metrics_summary(self.run_capture([capture]))
+        self.assertEqual(summary["frames_processed"], 3)
+        self.assertEqual(summary["frames_discarded"], 27)
+        self.assertEqual(self.models[-1].track.call_count, 3)
+
+    def test_file_wrong_reported_fps_uses_media_positions(self):
+        capture = Capture([frame("outside")] * 30, fps=1,
+                          timestamps=[i * 1000 / 30 for i in range(30)])
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "video.mp4"
+            path.touch()
+            summary = self.metrics_summary(self.run_capture([capture], str(path)))
+        self.assertEqual(summary["frames_processed"], 3)
+        self.assertEqual(summary["frames_discarded"], 27)
+
+    def test_custom_fps_and_reconnection_reset_sampling(self):
+        first = Capture([frame("outside")] * 3)
+        second = Capture([frame("outside")] * 3)
+        self.wait.side_effect = [False, True]
+        self.stack.enter_context(patch("dock_vision.pipeline.monotonic",
+                                      side_effect=[0, 0.2, 0.5, 0.6, 0.8, 1.1]))
+        with patch.dict(os.environ, PROCESS_FPS="2"):
+            summary = self.metrics_summary(self.run_capture([first, second]))
+        self.assertEqual(summary["frames_processed"], 4)
+        self.assertEqual(summary["frames_discarded"], 2)
+
+    def test_queue_size_validation_before_inference_imports(self):
+        with patch.dict(os.environ, FRAME_QUEUE_SIZE="0"), \
+                patch.dict(sys.modules, {"cv2": None, "ultralytics": None}):
+            with self.assertRaisesRegex(ValueError, "FRAME_QUEUE_SIZE"):
+                run_video(self.zone, self.events.append, self.stop)
+
+    def test_real_capture_advances_during_inference_and_keeps_latest_timestamp(self):
+        inference_started, captured = Event(), Event()
+        positions = ["inside"] * 21
+        capture = self.timed_capture(positions)
+        original_read = capture.read
+        reads = 0
+
+        def synchronized_read():
+            nonlocal reads
+            if reads == 1:
+                if not inference_started.wait(2):
+                    raise RuntimeError("Inference never started")
+            result = original_read()
+            reads += 1
+            if not result[0]:
+                captured.set()
+            return result
+
+        capture.read = synchronized_read
+        seen_timestamps = []
+        update = self.zone.update
+
+        def observe(track_id, point, timestamp, readings=()):
+            seen_timestamps.append(timestamp)
+            return update(track_id, point, timestamp, readings)
+
+        self.zone.update = observe
+        calls = 0
+
+        def infer(image, **kwargs):
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                inference_started.set()
+                if not captured.wait(2):
+                    raise RuntimeError("Capture blocked behind inference")
+            return tracked(image, **kwargs)
+
+        self.yolo.side_effect = lambda _: Mock(track=Mock(side_effect=infer))
+        with patch("dock_vision.pipeline.StreamReader", StreamReader):
+            summary = self.metrics_summary(self.run_capture([capture]))
+        self.assertEqual(calls, 2)
+        self.assertEqual(seen_timestamps, [101, 121])
+        self.assertEqual(summary["frames_received"], 21)
+        self.assertEqual(summary["frames_processed"], 2)
+        self.assertEqual(summary["frames_discarded"], 19)
+        self.assertEqual(summary["frame_queue"]["discarded"], 19)
+        self.assertEqual(summary["frame_queue"]["peak"], 5)
+        self.assertEqual(summary["frame_queue"]["size"], 0)
+        self.assertEqual([event["event_type"] for event in self.events],
+                         ["observed_inside", "tracking_lost"])
+        capture.release.assert_called_once()
+
+    def test_real_thread_reconnection_preserves_visit_identity(self):
+        consumed = [Event() for _ in range(4)]
+        observed = 0
+        original_update = self.zone.update
+
+        def update(*args, **kwargs):
+            nonlocal observed
+            events = original_update(*args, **kwargs)
+            consumed[observed].set()
+            observed += 1
+            return events
+
+        self.zone.update = update
+
+        def connection(offset):
+            capture = self.timed_capture(["inside", "inside"])
+            original_read = capture.read
+            count = 0
+
+            def read():
+                nonlocal count
+                if count and not consumed[offset + count - 1].wait(2):
+                    raise RuntimeError("Consumer failed to observe frame")
+                result = original_read()
+                count += 1
+                return result
+
+            capture.read = read
+            return capture
+
+        first, second = connection(0), connection(2)
+        self.wait.side_effect = [False, True]
+        with patch("dock_vision.pipeline.StreamReader", StreamReader):
+            self.run_capture([first, second])
+        self.assertEqual([event["event_type"] for event in self.events],
+                         ["observed_inside", "tracking_lost", "observed_inside", "tracking_lost"])
+        self.assertEqual(self.events[0]["visit_id"], self.events[1]["visit_id"])
+        self.assertEqual(self.events[2]["visit_id"], self.events[3]["visit_id"])
+        self.assertNotEqual(self.events[0]["visit_id"], self.events[2]["visit_id"])
+        self.assertEqual(len({event["stream_id"] for event in self.events}), 1)
+        self.assertEqual(len(self.models), 2)
+        first.release.assert_called_once()
+        second.release.assert_called_once()
 
     def timed_capture(self, positions, **kwargs):
         capture = Capture([frame(p) for p in positions], **kwargs)

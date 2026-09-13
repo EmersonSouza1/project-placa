@@ -4,12 +4,17 @@ import os
 from pathlib import Path
 import time
 from urllib.parse import urlsplit
+from time import monotonic
+
+from .metrics import PipelineMetrics
+from .sampling import FrameSampler
+from .stream_reader import StreamReader, queue_capacity
 
 log = logging.getLogger(__name__)
 
 
 class PlateReader:
-    def __init__(self, model_path, device):
+    def __init__(self, model_path, device, metrics):
         if not Path(model_path).is_file():
             raise ValueError("PLATE_MODEL must point to trained plate detection weights")
         from ultralytics import YOLO
@@ -17,6 +22,7 @@ class PlateReader:
         self.detector = YOLO(model_path)
         self.reader = TextRecognition(model_name="en_PP-OCRv4_mobile_rec", device="cpu")
         self.device = device
+        self.metrics = metrics
 
     def read(self, frame, bounds):
         height, width = frame.shape[:2]
@@ -24,7 +30,8 @@ class PlateReader:
         crop = frame[max(0, int(y1)):min(height, int(y2)), max(0, int(x1)):min(width, int(x2))]
         if not crop.size:
             return []
-        result = self.detector.predict(crop, conf=0.4, device=self.device, verbose=False)[0]
+        with self.metrics.measure("plate_detection"):
+            result = self.detector.predict(crop, conf=0.4, device=self.device, verbose=False)[0]
         candidates = []
         for box in result.boxes:
             px1, py1, px2, py2 = box.xyxy[0].tolist()
@@ -32,8 +39,9 @@ class PlateReader:
                          max(0, int(px1)):min(crop.shape[1], int(px2))]
             if not plate.size:
                 continue
-            for recognition in self.reader.predict(input=plate, batch_size=1):
-                candidates.append((str(recognition["rec_text"]), float(recognition["rec_score"])))
+            with self.metrics.measure("ocr"):
+                for recognition in self.reader.predict(input=plate, batch_size=1):
+                    candidates.append((str(recognition["rec_text"]), float(recognition["rec_score"])))
         # Only one vote per vehicle per frame: overlapping boxes must not inflate consensus.
         return [max(candidates, key=lambda item: item[1])] if candidates else []
 
@@ -65,6 +73,9 @@ def validate_source(source):
 def run_video(processor, emit, stop):
     source = os.environ.get("VIDEO_SOURCE", "")
     live = validate_source(source)
+    process_fps = os.environ.get("PROCESS_FPS", "3")
+    FrameSampler(process_fps)  # Validate configuration before loading models.
+    capacity = queue_capacity(os.environ.get("FRAME_QUEUE_SIZE", "5"))
 
     import cv2
     from ultralytics import YOLO
@@ -73,13 +84,15 @@ def run_video(processor, emit, stop):
         return
     device = os.environ.get("DEVICE", "cpu")
     vehicle_weights = os.environ.get("VEHICLE_MODEL", "yolo11n.pt")
-    reader = PlateReader(os.environ.get("PLATE_MODEL", "/models/plate.pt"), device) if os.environ.get("OCR_ENABLED", "false").lower() == "true" else None
+    metrics = PipelineMetrics(log, processor.camera_id, processor.stream_id)
+    reader = PlateReader(os.environ.get("PLATE_MODEL", "/models/plate.pt"), device, metrics) if os.environ.get("OCR_ENABLED", "false").lower() == "true" else None
     model = YOLO(vehicle_weights)
     capture = None
+    session = 0
     last_timestamp = time.time()
     try:
         while not stop.is_set():
-            # Timeouts prevent an unreachable RTSP source from hanging forever.
+            metrics.report()
             try:
                 capture = cv2.VideoCapture(source, cv2.CAP_FFMPEG, [
                     cv2.CAP_PROP_OPEN_TIMEOUT_MSEC, 5000,
@@ -87,7 +100,6 @@ def run_video(processor, emit, stop):
                 ])
                 opened = capture.isOpened()
             except cv2.error:
-                # Native error text may contain the authenticated source URL.
                 opened = False
             if not opened:
                 if capture is not None:
@@ -98,51 +110,58 @@ def run_video(processor, emit, stop):
                 log.warning("Camera unavailable camera_id=%s; retrying in 3 seconds", processor.camera_id)
                 stop.wait(3)
                 continue
-            fps = capture.get(cv2.CAP_PROP_FPS)
-            if not 0 < fps < 1000:
-                fps = 25
-            frame_number, started_at = 0, time.time()
-            while not stop.is_set():
+            session += 1
+            stream = StreamReader(capture, cv2, live, stop, capacity, process_fps,
+                                  session, log, processor.camera_id,
+                                  wall_clock=time.time, sample_clock=monotonic)
+            stream.start()
+            capture = None  # The capture thread now owns read/release.
+            processed_number = 0
+            try:
+                while not stop.is_set():
+                    packet = stream.get()
+                    metrics.capture_snapshot(stream.snapshot())
+                    metrics.report()
+                    if packet is None:
+                        if stream.finished:
+                            break
+                        continue
+                    if packet.session != session:
+                        raise RuntimeError("Capture session mismatch")
+                    frame, last_timestamp = packet.image, packet.timestamp
+                    height, width = frame.shape[:2]
+                    processed_number += 1
+                    metrics.frames_processed += 1
+                    with metrics.measure("vehicle_tracking"):
+                        result = model.track(frame, persist=True, tracker="bytetrack.yaml",
+                                             classes=[2, 3, 5, 7], conf=0.25,
+                                             device=device, verbose=False)[0]
+                    seen = set()
+                    if result.boxes.id is not None:
+                        for box in result.boxes:
+                            track_id = int(box.id.item())
+                            seen.add(track_id)
+                            bounds = box.xyxy[0].tolist()
+                            x1, _, x2, y2 = bounds
+                            point = ((x1 + x2) / (2 * width), y2 / height)
+                            readings = []
+                            if reader and processed_number % 5 == 0:
+                                try:
+                                    readings = reader.read(frame, bounds)
+                                except Exception:
+                                    log.exception("Plate OCR failed; zone tracking continues")
+                            for event in processor.update(track_id, point, last_timestamp, readings):
+                                emit(event)
+                    for event in processor.missing(seen, last_timestamp):
+                        emit(event)
+                if stream.failed:
+                    raise RuntimeError("Capture worker failed") from None
+            finally:
                 try:
-                    ok, frame = capture.read()
-                except cv2.error:
-                    ok, frame = False, None
-                if stop.is_set():
-                    break
-                if not ok or frame is None or not frame.size:
-                    break
-                height, width = frame.shape[:2]
-                if not height or not width:
-                    break
-                if frame_number == 0:
-                    log.info("First frame received camera_id=%s width=%s height=%s",
-                             processor.camera_id, width, height)
-                # Files use media time, not CPU inference time, for deterministic dwell.
-                last_timestamp = time.time() if live else started_at + frame_number / fps
-                frame_number += 1
-                result = model.track(frame, persist=True, tracker="bytetrack.yaml", classes=[2, 3, 5, 7],
-                                     conf=0.25, device=device, verbose=False)[0]
-                seen = set()
-                if result.boxes.id is not None:
-                    for box in result.boxes:
-                        track_id = int(box.id.item())
-                        seen.add(track_id)
-                        bounds = box.xyxy[0].tolist()
-                        x1, _, x2, y2 = bounds
-                        # Bottom-center approximates vehicle ground contact.
-                        point = ((x1 + x2) / (2 * width), y2 / height)
-                        readings = []
-                        if reader and frame_number % 5 == 0:
-                            try:
-                                readings = reader.read(frame, bounds)
-                            except Exception:
-                                log.exception("Plate OCR failed; zone tracking continues")
-                        for event in processor.update(track_id, point, last_timestamp, readings):
-                            emit(event)
-                for event in processor.missing(seen, last_timestamp):
-                    emit(event)
-            capture.release()
-            capture = None
+                    stream.close()
+                finally:
+                    metrics.capture_snapshot(stream.snapshot())
+                    last_timestamp = stream.last_timestamp
             for event in processor.interrupt(last_timestamp if not live else time.time()):
                 emit(event)
             if not live or stop.is_set():
@@ -151,10 +170,12 @@ def run_video(processor, emit, stop):
                         processor.camera_id)
             if stop.wait(3):
                 return
-            # A new tracker cannot inherit IDs/state across camera reconnection.
             model = YOLO(vehicle_weights)
     finally:
-        if capture is not None:
-            capture.release()
-        for event in processor.interrupt(last_timestamp if not live else time.time()):
-            emit(event)
+        try:
+            if capture is not None:
+                capture.release()
+            for event in processor.interrupt(last_timestamp if not live else time.time()):
+                emit(event)
+        finally:
+            metrics.report(final=True)

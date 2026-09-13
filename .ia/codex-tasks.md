@@ -16,6 +16,8 @@ Execute uma tarefa por vez. Não antecipe infraestrutura de fases futuras. Para 
 
 ## T01 — Baseline de métricas
 
+**Status:** concluída em 13/09/2026. Contadores, durações e logs periódicos/finais implementados no modo de vídeo; 46 testes Python passaram. Evidência em [Testes](testes.md). Benchmark real permanece em T10.
+
 **Objetivo:** tornar o custo atual mensurável.
 
 Implementar contadores e tempos do pipeline de visão sem alterar o contrato da API.
@@ -30,6 +32,8 @@ Aceite:
 
 ## T02 — Frame sampling configurável
 
+**Status:** concluída em 13/09/2026. `PROCESS_FPS=3`, seleção temporal, descartes nas métricas e preservação do tempo dos frames implementados. 58 testes Python passaram; Compose validado com `.env.example`. Evidência em [Testes](testes.md). A fila foi implementada na T03; benchmark real permanece em T10.
+
 **Objetivo:** impedir inferência em todos os frames.
 
 Adicionar `PROCESS_FPS`, com default inicial de 3 FPS para modo de vídeo.
@@ -42,6 +46,8 @@ Aceite:
 - teste cobre seleção/descartes sem exigir câmera real.
 
 ## T03 — Bounded/latest-frame queue
+
+**Status:** concluída em 13/09/2026. Captura em thread por conexão, `FRAME_QUEUE_SIZE=5`, descarte de antigos em RTSP, fila com espera por espaço em arquivos, métricas e encerramento limitado. 72 testes Python passaram, incluindo testes com threads reais. Evidência em [Testes](testes.md).
 
 **Objetivo:** evitar backlog.
 

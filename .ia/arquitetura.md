@@ -40,24 +40,32 @@ flowchart LR
    de host e porta válida quando informada; arquivos precisam existir. A URL
    original, incluindo autenticação e query, é preservada para a conexão.
    OpenCV abre a fonte com backend FFmpeg e timeouts de 5 segundos.
-2. YOLO usa `model.track(..., persist=True, tracker='bytetrack.yaml')`, confiança
+2. Antes da inferência, `PROCESS_FPS` seleciona até um frame por intervalo de
+   `1 / PROCESS_FPS` segundo (padrão 3 FPS). RTSP usa relógio monotônico;
+   arquivos usam tempo de mídia. Descartes não chamam o processador de zonas.
+   YOLO usa `model.track(..., persist=True, tracker='bytetrack.yaml')`, confiança
    mínima de 0,25 e classes COCO 2, 3, 5 e 7: carro, moto, ônibus e caminhão.
 3. O centro inferior da caixa do veículo é normalizado e enviado ao processador
    de zonas, associado ao ID do tracker.
-4. Se OCR estiver habilitado, a cada quinto frame o recorte do veículo passa pelo
+4. Se OCR estiver habilitado, a cada quinto frame processado o recorte do veículo passa pelo
    detector específico de placas, com confiança mínima de 0,4, e pelo PaddleOCR.
 5. A melhor leitura daquele veículo/frame alimenta o consenso. O processador
    emite eventos quando confirma uma transição ou detecta perda do track.
 
-OCR e tracking executam no mesmo loop; apenas o envio HTTP usa outro thread.
+OCR e tracking executam no mesmo loop de inferência. A leitura/sampling de frames
+ocorre em um thread por conexão, com fila limitada; a outbox continua enviando
+HTTP em seu próprio thread.
 Falhas de OCR durante a leitura são registradas sem interromper o tracking. Falhas
 na inicialização dos modelos ainda podem impedir o início do worker.
 
-RTSP usa o horário corrente. Arquivos usam o início da execução mais o índice do
-frame dividido pelo FPS, com fallback de 25 FPS. Isso representa tempo do vídeo,
-não a data original da gravação, nem uma medição precisa de vídeos com FPS variável.
+RTSP mantém o horário de leitura do frame como timestamp do evento. Arquivos
+usam o início da leitura mais a posição de mídia relativa ao primeiro frame.
+Posições ausentes, repetidas ou regressivas avançam pelo FPS reportado; FPS
+inválido usa fallback de 25. Metadados simultaneamente incorretos podem produzir
+tempos aproximados. Não se trata da data original de gravação.
 
-Na desconexão, visitas ativas são interrompidas e o tracker é recriado. O worker
+Na desconexão, o consumidor termina de tratar a fila da conexão antiga (em RTSP,
+apenas o frame mais recente disponível), interrompe visitas ativas e recria o tracker. O worker
 tenta reconectar após 3 segundos. O `stream_id` permanece durante essa execução;
 novas ocupações recebem novos `visit_id`.
 
@@ -104,3 +112,36 @@ O Dockerfile Python tem estágios `simulation` e `inference`. O primeiro não in
 IA; o segundo instala o extra `vision`. A configuração inicial usa CPU. `DEVICE`
 é repassado aos detectores YOLO, mas o PaddleOCR está explicitamente em CPU;
 o Compose não configura acesso a GPU.
+
+
+## Baseline de métricas (T01)
+
+O módulo [metrics.py](../services/vision/dock_vision/metrics.py), dependente somente
+da biblioteca padrão, recebe contadores e durações do modo `video`.
+O pipeline mede conjuntamente YOLO/ByteTrack; `PlateReader` mede separadamente
+detecção de placa e execução completa do OCR. Logs JSON periódicos e finais
+permitem comparar chamadas, falhas, FPS observado, média e p95. Cada etapa
+armazena no máximo 512 durações; média e contagem abrangem toda a janela.
+
+A instrumentação não muda cadência de inferência, domínio, outbox ou contrato
+HTTP. Simulação e diagnóstico `ocr_test` preservam seus fluxos. A semântica dos
+contadores e as limitações estão em [Operação](operacao.md).
+
+## Captura e fila limitada (T03)
+
+[stream_reader.py](../services/vision/dock_vision/stream_reader.py) gerencia um
+thread de leitura por conexão. A abertura continua no coordenador; após o início
+do thread, apenas ele chama `read`/`release`. O produtor aplica sampling e envia
+imagem, timestamp original e sessão em memória. Não acessa domínio, modelos,
+outbox ou API.
+
+A fila possui capacidade `FRAME_QUEUE_SIZE` (padrão 5). Em RTSP, o produtor remove
+o mais antigo quando cheia; o consumidor retira o mais recente e descarta os
+demais pendentes. Em arquivos, produtor aguarda espaço e consumidor mantém FIFO,
+evitando descartar todo o vídeo quando a decodificação é mais rápida que a IA.
+
+Fim/falha de captura são sinalizados fora da fila. O coordenador fecha o leitor e
+aguarda seu encerramento antes de reconectar; cada conexão recebe uma fila nova.
+Frames pendentes são liberados no shutdown. A identidade interna de sessão não
+altera `stream_id`, `visit_id` ou o contrato HTTP. A proteção dos contadores usa
+uma condição/lock, e somente o consumidor agrega os snapshots em `PipelineMetrics`.
