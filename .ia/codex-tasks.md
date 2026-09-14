@@ -78,6 +78,8 @@ Aceite:
 
 ## T05 — MotionDetector
 
+**Status:** concluída em 14/09/2026. Detector por diferença entre frames aplicado somente à ROI, configurável, desabilitado por padrão e sem produzir eventos.
+
 **Objetivo:** evitar YOLO em cena estática.
 
 Implementar detector leve de movimento antes da inferência de veículos.

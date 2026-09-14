@@ -7,6 +7,7 @@ from urllib.parse import urlsplit
 from time import monotonic
 
 from .metrics import PipelineMetrics
+from .motion import MotionDetector, motion_config
 from .sampling import FrameSampler
 from .roi import ProcessingRoi
 from .stream_reader import StreamReader, queue_capacity
@@ -77,6 +78,7 @@ def run_video(processor, emit, stop):
     process_fps = os.environ.get("PROCESS_FPS", "3")
     FrameSampler(process_fps)  # Validate configuration before loading models.
     processing_roi = ProcessingRoi.parse(os.environ.get("PROCESSING_ROI", ""))
+    motion_enabled, motion_ratio = motion_config(os.environ.get("MOTION_ENABLED", "false"), os.environ.get("MOTION_MINIMUM_CHANGED_RATIO", "0.02"))
     capacity = queue_capacity(os.environ.get("FRAME_QUEUE_SIZE", "5"))
 
     import cv2
@@ -117,6 +119,7 @@ def run_video(processor, emit, stop):
                                   session, log, processor.camera_id,
                                   wall_clock=time.time, sample_clock=monotonic)
             stream.start()
+            motion = MotionDetector(cv2, motion_ratio) if motion_enabled else None
             capture = None  # The capture thread now owns read/release.
             processed_number = 0
             try:
@@ -133,6 +136,9 @@ def run_video(processor, emit, stop):
                     frame, last_timestamp = packet.image, packet.timestamp
                     height, width = frame.shape[:2]
                     inference_frame, roi_offset = processing_roi.crop(frame)
+                    if motion and not motion.has_motion(inference_frame):
+                        metrics.frames_discarded += 1
+                        continue
                     processed_number += 1
                     metrics.frames_processed += 1
                     with metrics.measure("vehicle_tracking"):
