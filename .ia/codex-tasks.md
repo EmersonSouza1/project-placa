@@ -123,6 +123,8 @@ Aceite:
 
 ## T08 — BestFrameSelector
 
+**Status:** concluída em 14/09/2026. Score determinístico de nitidez, confiança e área relativa implementado sem dependência de PaddleOCR, com pesos validados e desempate estável.
+
 **Objetivo:** reduzir chamadas ao OCR.
 
 Implementar score determinístico usando nitidez, confiança do detector e tamanho da placa.
