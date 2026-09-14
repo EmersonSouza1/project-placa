@@ -110,6 +110,8 @@ Aceite:
 
 ## T07 — CaptureManager
 
+**Status:** concluída em 14/09/2026. Armazenamento limitado por visita/track, intervalo mínimo configurável e liberação de memória implementados em componente independente.
+
 **Objetivo:** coletar poucos candidatos de boa qualidade.
 
 Aceite:
