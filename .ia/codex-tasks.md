@@ -110,6 +110,8 @@ Aceite:
 
 ## T07 — CaptureManager
 
+**Status:** concluída em 14/09/2026. Armazenamento limitado por visita/track, intervalo mínimo configurável e liberação de memória implementados em componente independente.
+
 **Objetivo:** coletar poucos candidatos de boa qualidade.
 
 Aceite:
@@ -120,6 +122,8 @@ Aceite:
 - memória liberada ao finalizar/perder a visita.
 
 ## T08 — BestFrameSelector
+
+**Status:** concluída em 14/09/2026. Score determinístico de nitidez, confiança e área relativa implementado sem dependência de PaddleOCR, com pesos validados e desempate estável.
 
 **Objetivo:** reduzir chamadas ao OCR.
 
@@ -133,6 +137,8 @@ Aceite:
 - sem dependência de PaddleOCR para testar seleção.
 
 ## T09 — PlateWorker desacoplado
+
+**Status:** concluída em 14/09/2026. OCR movido para fila limitada com workers limitados, modelos reutilizados, identidade preservada no resultado e aplicação ao domínio somente no thread principal.
 
 **Objetivo:** OCR lento não bloquear captura/tracking.
 
