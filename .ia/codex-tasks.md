@@ -138,6 +138,8 @@ Aceite:
 
 ## T09 — PlateWorker desacoplado
 
+**Status:** concluída em 14/09/2026. OCR movido para fila limitada com workers limitados, modelos reutilizados, identidade preservada no resultado e aplicação ao domínio somente no thread principal.
+
 **Objetivo:** OCR lento não bloquear captura/tracking.
 
 Aceite:
