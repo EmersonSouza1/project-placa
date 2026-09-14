@@ -9,6 +9,7 @@ from time import monotonic
 from .metrics import PipelineMetrics
 from .motion import MotionDetector, motion_config
 from .plate_capture import PlateCapturePolicy, plate_capture_config
+from .plate_worker import PlateJob, PlateWorker, plate_worker_config
 from .sampling import FrameSampler
 from .roi import ProcessingRoi
 from .stream_reader import StreamReader, queue_capacity
@@ -83,6 +84,8 @@ def run_video(processor, emit, stop):
     capture_attempts, capture_window = plate_capture_config(
         os.environ.get("PLATE_CAPTURE_MAX_ATTEMPTS", "5"),
         os.environ.get("PLATE_CAPTURE_WINDOW_SECONDS", "10"))
+    plate_queue_size, plate_workers = plate_worker_config(
+        os.environ.get("PLATE_QUEUE_SIZE", "5"), os.environ.get("PLATE_WORKERS", "1"))
     capacity = queue_capacity(os.environ.get("FRAME_QUEUE_SIZE", "5"))
 
     import cv2
@@ -95,6 +98,7 @@ def run_video(processor, emit, stop):
     metrics = PipelineMetrics(log, processor.camera_id, processor.stream_id)
     reader = PlateReader(os.environ.get("PLATE_MODEL", "/models/plate.pt"), device, metrics) if os.environ.get("OCR_ENABLED", "false").lower() == "true" else None
     model = YOLO(vehicle_weights)
+    plate_worker = PlateWorker(reader.read, plate_queue_size, plate_workers) if reader else None
     capture = None
     session = 0
     last_timestamp = time.time()
@@ -138,6 +142,12 @@ def run_video(processor, emit, stop):
                         continue
                     if packet.session != session:
                         raise RuntimeError("Capture session mismatch")
+                    if plate_worker:
+                        for track_id, visit_id, readings, error in plate_worker.drain():
+                            if error:
+                                log.error("Plate OCR failed; zone tracking continues", exc_info=error)
+                            else:
+                                processor.add_plate_readings(track_id, visit_id, readings)
                     frame, last_timestamp = packet.image, packet.timestamp
                     height, width = frame.shape[:2]
                     inference_frame, roi_offset = processing_roi.crop(frame)
@@ -162,13 +172,11 @@ def run_video(processor, emit, stop):
                             for event in processor.update(track_id, point, last_timestamp):
                                 emit(event)
                             visit_id, has_consensus = processor.plate_capture_context(track_id)
-                            if reader and plate_capture.should_capture(
+                            if plate_worker and plate_capture.should_capture(
                                     visit_id, last_timestamp, has_consensus):
-                                try:
-                                    readings = reader.read(frame, bounds)
-                                    processor.add_plate_readings(track_id, visit_id, readings)
-                                except Exception:
-                                    log.exception("Plate OCR failed; zone tracking continues")
+                                if not plate_worker.submit(PlateJob(
+                                        track_id, visit_id, frame, bounds)):
+                                    log.warning("Plate queue full; capture discarded track_id=%s", track_id)
                     for event in processor.missing(seen, last_timestamp):
                         emit(event)
                     plate_capture.retain(processor.active_visit_ids())
@@ -196,4 +204,6 @@ def run_video(processor, emit, stop):
             for event in processor.interrupt(last_timestamp if not live else time.time()):
                 emit(event)
         finally:
+            if plate_worker:
+                plate_worker.close()
             metrics.report(final=True)
