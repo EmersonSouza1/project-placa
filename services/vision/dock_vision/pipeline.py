@@ -8,6 +8,7 @@ from time import monotonic
 
 from .metrics import PipelineMetrics
 from .motion import MotionDetector, motion_config
+from .plate_capture import PlateCapturePolicy, plate_capture_config
 from .sampling import FrameSampler
 from .roi import ProcessingRoi
 from .stream_reader import StreamReader, queue_capacity
@@ -79,6 +80,9 @@ def run_video(processor, emit, stop):
     FrameSampler(process_fps)  # Validate configuration before loading models.
     processing_roi = ProcessingRoi.parse(os.environ.get("PROCESSING_ROI", ""))
     motion_enabled, motion_ratio = motion_config(os.environ.get("MOTION_ENABLED", "false"), os.environ.get("MOTION_MINIMUM_CHANGED_RATIO", "0.02"))
+    capture_attempts, capture_window = plate_capture_config(
+        os.environ.get("PLATE_CAPTURE_MAX_ATTEMPTS", "5"),
+        os.environ.get("PLATE_CAPTURE_WINDOW_SECONDS", "10"))
     capacity = queue_capacity(os.environ.get("FRAME_QUEUE_SIZE", "5"))
 
     import cv2
@@ -120,6 +124,7 @@ def run_video(processor, emit, stop):
                                   wall_clock=time.time, sample_clock=monotonic)
             stream.start()
             motion = MotionDetector(cv2, motion_ratio) if motion_enabled else None
+            plate_capture = PlateCapturePolicy(capture_attempts, capture_window)
             capture = None  # The capture thread now owns read/release.
             processed_number = 0
             try:
@@ -154,16 +159,19 @@ def run_video(processor, emit, stop):
                                 box.xyxy[0].tolist(), roi_offset)
                             x1, _, x2, y2 = bounds
                             point = ((x1 + x2) / (2 * width), y2 / height)
-                            readings = []
-                            if reader and processed_number % 5 == 0:
+                            for event in processor.update(track_id, point, last_timestamp):
+                                emit(event)
+                            visit_id, has_consensus = processor.plate_capture_context(track_id)
+                            if reader and plate_capture.should_capture(
+                                    visit_id, last_timestamp, has_consensus):
                                 try:
                                     readings = reader.read(frame, bounds)
+                                    processor.add_plate_readings(track_id, visit_id, readings)
                                 except Exception:
                                     log.exception("Plate OCR failed; zone tracking continues")
-                            for event in processor.update(track_id, point, last_timestamp, readings):
-                                emit(event)
                     for event in processor.missing(seen, last_timestamp):
                         emit(event)
+                    plate_capture.retain(processor.active_visit_ids())
                 if stream.failed:
                     raise RuntimeError("Capture worker failed") from None
             finally:

@@ -94,6 +94,8 @@ Aceite:
 
 ## T06 — Plate capture orientado a estado
 
+**Status:** concluída em 14/09/2026. OCR limitado a visitas ativas, interrompido após consenso, quantidade máxima de tentativas ou fim da janela; estado liberado ao finalizar/perder a visita.
+
 **Objetivo:** executar reconhecimento de placa somente quando útil.
 
 Adicionar solicitação explícita de captura ligada ao contexto da visita/track.

@@ -111,6 +111,23 @@ class ZoneProcessor:
             return [result]
         return []
 
+    def plate_capture_context(self, track_id):
+        track = self.tracks.get(track_id)
+        if not track or not track.visit_id:
+            return None, False
+        plate, _ = track.plates.best()
+        return track.visit_id, plate is not None
+
+    def add_plate_readings(self, track_id, visit_id, readings):
+        track = self.tracks.get(track_id)
+        if not track or track.visit_id != visit_id:
+            return
+        for text, confidence in readings:
+            track.plates.add(text, confidence)
+
+    def active_visit_ids(self):
+        return {track.visit_id for track in self.tracks.values() if track.visit_id}
+
     def missing(self, seen_ids, timestamp):
         events = []
         for track_id, track in list(self.tracks.items()):
