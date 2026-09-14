@@ -251,3 +251,10 @@ A captura usa um thread separado e `FRAME_QUEUE_SIZE=5` limita os frames pendent
 Em RTSP, o consumidor prioriza o mais recente; arquivos aguardam espaço para
 preservar a reprodução. Consulte [operação](.ia/operacao.md) para timestamps,
 métricas, encerramento e limitações dos buffers internos da câmera.
+
+
+## ROI de processamento (T04)
+
+`PROCESSING_ROI` limita a imagem enviada ao YOLO/ByteTrack sem alterar a zona lógica da doca. O formato é `left,top,right,bottom`, com quatro coordenadas normalizadas entre 0 e 1; vazio mantém o frame completo. Exemplo: `PROCESSING_ROI=0.15,0.10,0.90,0.95`.
+
+A ROI é um retângulo de otimização: tudo fora dela fica invisível para a inferência. A zona da doca continua sendo o polígono de `config/zone.json` e determina entrada/saída. As caixas retornadas pelo tracker no recorte são transladadas ao frame completo antes de normalizar o centro inferior, aplicar a zona e recortar o veículo para leitura de placa. Configuração inválida interrompe a inicialização antes de carregar OpenCV e modelos. Uma ROI mal calibrada pode ocultar veículos ou transições e deve ser validada com vídeo anotado.

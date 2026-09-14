@@ -263,3 +263,6 @@ container foi iniciado/reconfigurado e o `.env` real não foi alterado.
 Sem câmera/modelos reais, benchmark, medição de memória do processo ou integração
 .NET/PostgreSQL nesta mudança. A fila é limitada por construção e por testes;
 isso não comprova latência, precisão de tracking ou limites dos buffers nativos.
+
+
+Na implementação da **T04**, em **13/09/2026**, foram adicionados testes unitários da configuração normalizada, limites, recorte e translação das caixas para o frame completo. Eles não exigem OpenCV, câmera ou modelos. A inferência real com ROI ainda precisa ser comparada no benchmark T10; testes sintéticos não comprovam redução de CPU nem qualidade de detecção.

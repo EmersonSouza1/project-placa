@@ -63,6 +63,8 @@ Aceite:
 
 ## T04 — ROI configurável
 
+**Status:** concluída em 13/09/2026. ROI retangular normalizada e opcional implementada antes do YOLO/ByteTrack, com validação anterior aos imports de visão, restauração das coordenadas do frame completo e testes unitários sem OpenCV/modelos.
+
 **Objetivo:** reduzir a área analisada.
 
 Adicionar ROI de processamento separada do polígono lógico da doca quando necessário.
@@ -75,6 +77,8 @@ Aceite:
 - documentação explica diferença entre ROI e zona da doca.
 
 ## T05 — MotionDetector
+
+**Status:** concluída em 14/09/2026. Detector por diferença entre frames aplicado somente à ROI, configurável, desabilitado por padrão e sem produzir eventos.
 
 **Objetivo:** evitar YOLO em cena estática.
 
@@ -89,6 +93,8 @@ Aceite:
 - teste com frames sintéticos estáticos e com alteração.
 
 ## T06 — Plate capture orientado a estado
+
+**Status:** concluída em 14/09/2026. OCR limitado a visitas ativas, interrompido após consenso, quantidade máxima de tentativas ou fim da janela; estado liberado ao finalizar/perder a visita.
 
 **Objetivo:** executar reconhecimento de placa somente quando útil.
 
